@@ -18,6 +18,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import io
 import json
 import re
@@ -110,6 +111,52 @@ def wikia_filename(url):
     """Extract the source filename from a wikia image URL."""
     m = re.search(r"/images/\w/\w\w/([^/?]+)", url)
     return urllib.parse.unquote(m.group(1)) if m else ""
+
+
+# --------------------------------------------------------------------------
+# MHFU iOS icon set — clean per-monster icons. We bypass the wiki's HTML
+# entirely: list every "MHFUiOS-…_Icon.png" via the MediaWiki API, then
+# fetch each from the CDN using the wiki's MD5 path convention
+# (images/<c0>/<c0c1>/<filename>, where c0c1 are the first two hex chars of
+# md5(filename)). This avoids the link/image pairing brittleness that made
+# the old scrape pair the wrong icon with the wrong monster.
+# --------------------------------------------------------------------------
+
+ICON_PREFIX = "MHFUiOS-"
+ICON_SUFFIX = "_Icon.png"
+ALLIMAGES_URL = (f"{WIKI}/api.php?action=query&list=allimages"
+                 f"&aiprefix={ICON_PREFIX}&ailimit=500&format=json")
+
+
+def wikia_cdn_url(filename, scale=None):
+    """Construct the static.wikia.nocookie.net URL for a wiki filename.
+
+    Wikia stores files at /images/<c0>/<c0c1>/<filename> where c0/c1 are
+    the first two hex chars of md5(filename). The `revision/latest`
+    segment fetches the current version; appending `scale-to-width-down/N`
+    yields the server-side thumbnail.
+    """
+    h = hashlib.md5(filename.encode("utf-8")).hexdigest()
+    enc = urllib.parse.quote(filename)
+    base = (f"https://static.wikia.nocookie.net/monsterhunter/images/"
+            f"{h[0]}/{h[:2]}/{enc}/revision/latest")
+    if scale:
+        base += f"/scale-to-width-down/{scale}"
+    return base
+
+
+def list_ios_icons():
+    """Return [(display_name, filename), ...] for every MHFUiOS-* icon."""
+    raw = http_get(ALLIMAGES_URL)
+    data = json.loads(raw)
+    out = []
+    for item in data.get("query", {}).get("allimages", []):
+        fname = item.get("name", "")
+        if not (fname.startswith(ICON_PREFIX) and fname.endswith(ICON_SUFFIX)):
+            continue
+        display = fname[len(ICON_PREFIX):-len(ICON_SUFFIX)].replace("_", " ")
+        out.append((display, fname))
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -240,24 +287,40 @@ def fetch_fixed():
     return ok
 
 
-def fetch_monsters():
+def fetch_monsters(*, clean=True):
+    """Fetch the MHFU iOS icon set and write the manifest.
+
+    Each monster gets its own clean icon at assets/monsters/<slug>.png.
+    If `clean` is set (default), any pre-existing PNGs are removed first
+    so stale / wrong icons from earlier scrape runs do not linger.
+    """
+    monsters_dir = ASSETS / "monsters"
+    monsters_dir.mkdir(parents=True, exist_ok=True)
+    if clean:
+        removed = 0
+        for stale in monsters_dir.glob("*.png"):
+            stale.unlink()
+            removed += 1
+        if removed:
+            print(f"· cleaned {removed} stale icon(s) from {monsters_dir}")
+
     try:
-        found = scrape_monsters()
+        icons = list_ios_icons()
     except Exception as e:                           # noqa: BLE001
-        print(f"  ! monster scrape failed: {e}")
+        print(f"  ! icon list failed: {e}")
         return
-    print(f"· {len(found)} monster icons found — downloading …")
+    print(f"· {len(icons)} MHFU iOS icons — downloading …")
     manifest = {}
-    for n, (slug, (name, url)) in enumerate(sorted(found.items()), 1):
+    for n, (name, fname) in enumerate(sorted(icons), 1):
+        slug = slugify(name)
         try:
-            data = http_get(wikia_full(url, width=256))
-            save_image(data, ASSETS / "monsters" / f"{slug}.png",
-                       max_side=256)
+            data = http_get(wikia_cdn_url(fname, scale=128))
+            save_image(data, monsters_dir / f"{slug}.png", max_side=128)
             manifest[slug] = f"{slug}.png"
-            print(f"  ✓ [{n}/{len(found)}] {name}")
+            print(f"  ✓ [{n}/{len(icons)}] {name} -> {slug}")
         except Exception as e:                       # noqa: BLE001
-            print(f"  ! [{n}/{len(found)}] {name}: {e}")
-    write_manifest(ASSETS / "monsters", manifest)
+            print(f"  ! [{n}/{len(icons)}] {name}: {e}")
+    write_manifest(monsters_dir, manifest)
     print(f"· monsters manifest: {len(manifest)} icons")
 
 
