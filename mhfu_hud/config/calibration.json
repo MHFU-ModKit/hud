@@ -1,0 +1,14 @@
+{
+  "quest_map": {
+    "mode": "player_centered",
+    "scale": 0.030789487093842386,
+    "rot_deg": 0.0,
+    "origin_x": -150.0,
+    "origin_z": 50.0
+  },
+  "village_marker": {
+    "nx": 0.5,
+    "ny": 0.62,
+    "facing_offset_deg": 0.0
+  }
+}

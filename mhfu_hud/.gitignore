@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+config/calibration.local.json
+tools/_preview/
+.DS_Store
