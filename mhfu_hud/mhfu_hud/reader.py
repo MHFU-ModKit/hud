@@ -24,6 +24,11 @@ from .state import Context, GameSnapshot, MonsterHUD, PlayerHUD, Vec3
 # tracks a running max from live values and prefers that.
 HP_MAX_FALLBACK = 150
 STAMINA_MAX_FALLBACK = 320
+# Tight plausible upper bounds for the live cells. A read above these is
+# treated as zone-load garbage and skipped — otherwise a transient huge
+# value latches into the running max and never goes back down.
+HP_MAX_SANE = 1000
+STAMINA_MAX_SANE = 2000
 
 
 def _vec3(buf: bytes, off: int) -> Vec3:
@@ -41,10 +46,10 @@ def _finite(v: Vec3) -> bool:
 class MemoryReader:
     """Owns the PPSSPP connection and the polling thread."""
 
-    def __init__(self, host=None, port=None, poll_hz: float = 10.0):
+    def __init__(self, host=None, port=None, poll_hz: float = 3.0):
         self.host = host
         self.port = port
-        self.poll_interval = 1.0 / max(1.0, poll_hz)
+        self.poll_interval = 1.0 / max(0.5, poll_hz)
         self._client = None
         self._thread = None
         self._stop = threading.Event()
@@ -64,11 +69,19 @@ class MemoryReader:
         self._thread.start()
 
     def stop(self):
+        # Close the WebSocket FIRST. The reader thread may be mid-poll
+        # blocked in PPSSPPClient._request waiting on a ticket reply; if
+        # we joined first we'd burn up to `client.timeout` seconds waiting
+        # for it. Closing the client wakes parked waiters and the reader
+        # thread exits within one loop iteration.
         self._stop.set()
+        if self._client:
+            try:
+                self._client.close()
+            except Exception:
+                pass
         if self._thread:
             self._thread.join(timeout=2.0)
-        if self._client:
-            self._client.close()
 
     @property
     def snapshot(self) -> GameSnapshot:
@@ -146,13 +159,18 @@ class MemoryReader:
         quest_timer = c.read_u32(A.QUEST_TIMER)
         carve = c.read_u8(A.CARVE_COUNT)
 
-        # Region B1: current HP at the low end of the player heap block.
-        # Region B2: weapon-drawn flag a bit higher up.
-        # Region B3: recov-cap + max-HP pair packed in one u32 word.
-        hp = c.read_u16(A.PLAYER_HP)
-        weapon_drawn = bool(c.read_u8(A.WEAPON_DRAWN))
-        hp_pair = c.read_memory(A.PLAYER_HP_RECOV, 4)
-        hp_recov, hp_max_live = struct.unpack_from("<HH", hp_pair, 0)
+        # Region B: player heap block — one read covers current HP
+        # (0x090B3724), recov+max pair (0x090B385C..0x090B385F), and the
+        # weapon-drawn flag (0x090B3A52). Coalesced into a single fetch
+        # so the poll cycle stays cheap on the PPSSPP debugger socket
+        # (a flood of small reads visibly hitches emulation).
+        b_base = 0x090B3700
+        b_size = 0x400
+        b = c.read_memory(b_base, b_size)
+        hp = struct.unpack_from("<H", b, A.PLAYER_HP - b_base)[0]
+        hp_recov, hp_max_live = struct.unpack_from(
+            "<HH", b, A.PLAYER_HP_RECOV - b_base)
+        weapon_drawn = bool(b[A.WEAPON_DRAWN - b_base])
 
         # Region C: player struct (vtable + position + rotation)
         pc = c.read_memory(A.PLAYER_STRUCT, A.PLAYER_STRUCT_SPAN)
@@ -171,24 +189,33 @@ class MemoryReader:
         cam_target = _vec3(d, 0)
         cam_offset = _vec3(d, A.CAM_OFFSET - A.CAM_TARGET)
 
-        # Prefer the live max-HP cell. Keep a running ceiling as a backstop
-        # for the moment the game zeros the struct mid zone-load.
-        if p_loaded and 0 < hp_max_live < 60000:
+        # Only trust the live cells while the game is in a stable in-area
+        # state (screen_state==17) with the player struct loaded. During
+        # a zone-load (screen_state flips 17->1->17) the stats cells hold
+        # transitional garbage; latching the running max to that value
+        # leaves the bar broken until process restart.
+        stable = (screen_state == 17) and p_loaded
+        if stable and 0 < hp_max_live <= HP_MAX_SANE:
             self._hp_max = max(self._hp_max, hp_max_live)
-        if 0 < stamina < 60000:
+        if stable and 0 < stamina <= STAMINA_MAX_SANE:
             self._stamina_max = max(self._stamina_max, stamina)
-        hp_max = hp_max_live if 0 < hp_max_live < 60000 else self._hp_max
+        hp_max = hp_max_live if 0 < hp_max_live <= HP_MAX_SANE else self._hp_max
         hp_max = hp_max or HP_MAX_FALLBACK
+        # Reject obviously bogus live readings for the rendered bar — show
+        # the last known good value instead of a 5-digit "current" stamina.
+        stamina_render = stamina if 0 <= stamina <= STAMINA_MAX_SANE else None
+        hp_render = hp if 0 <= hp <= HP_MAX_SANE else None
 
         player = PlayerHUD(
             loaded=p_loaded,
             pos_world=cam_target,
             pos_local=pos_local,
             facing_rad=facing,
-            hp=hp if p_loaded else None,
-            hp_recov=hp_recov if p_loaded else None,
+            hp=hp_render if p_loaded else None,
+            hp_recov=hp_recov if p_loaded and 0 <= hp_recov <= HP_MAX_SANE
+                     else None,
             hp_max=hp_max,
-            stamina=stamina,
+            stamina=stamina_render,
             stamina_max=self._stamina_max or STAMINA_MAX_FALLBACK,
             weapon_drawn=weapon_drawn if p_loaded else None,
         )
@@ -251,14 +278,17 @@ class MemoryReader:
             return out
         ptrs = struct.unpack_from("<%dI" % A.ENTITY_MAX_SLOTS, ea, 0)
         # Slot 0 never holds the player (it is a stale code address) — skip it.
+        # The registry is sparse: when a monster despawns its slot zeroes
+        # but later slots can still be live. Walk every slot and skip
+        # invalid entries instead of breaking on the first zero.
         for slot in range(1, A.ENTITY_MAX_SLOTS):
             ptr = ptrs[slot]
             if ptr == 0 or not A.in_ram(ptr):
-                break
+                continue
             try:
                 mb = c.read_memory(ptr, A.MONSTER_STRUCT_SPAN)
             except PPSSPPError:
-                break
+                continue
             if len(mb) < A.MONSTER_STRUCT_SPAN:
                 continue
             m = self._parse_monster(slot, ptr, mb)

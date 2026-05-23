@@ -40,7 +40,13 @@ _HELP = [
 class HUDApp:
     def __init__(self, reader, fullscreen=False):
         self.reader = reader
-        pygame.init()
+        # NB: NOT `pygame.init()`. That calls SDL_Init(SDL_INIT_EVERYTHING),
+        # which brings up the joystick / game-controller subsystems. On
+        # macOS that races PPSSPP for IOHID gamepad reports — PPSSPP then
+        # freezes the controller at its last value (and never sees a fresh
+        # event, even on physical disconnect). We only need video + fonts.
+        pygame.display.init()
+        pygame.font.init()
         pygame.display.set_caption(WINDOW_TITLE)
         self._windowed_size = (CANVAS_W, CANVAS_H)
         self.fullscreen = fullscreen

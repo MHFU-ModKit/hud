@@ -10,7 +10,7 @@ gameplay.
 import base64
 import json
 import struct
-import time
+import threading
 import urllib.request
 import uuid
 from typing import Optional, Tuple
@@ -34,6 +34,18 @@ class PPSSPPClient:
         self.port = port
         self.timeout = timeout
         self._ws = None
+        # Background recv-drain — PPSSPP emits unsolicited input.analog / log
+        # / cpu events every frame; if nothing is reading the socket between
+        # polls the send buffer fills and PPSSPP's main thread blocks on
+        # emit_event (visible as the game ignoring input + savestate loads
+        # hanging). The drain thread keeps the socket flushed and parks
+        # ticket replies in `_pending` so `_request` can pick them up.
+        self._recv_thread: Optional[threading.Thread] = None
+        self._stop_recv = threading.Event()
+        self._pending: dict = {}                # ticket -> {event, result}
+        self._pending_lock = threading.Lock()
+        self._send_lock = threading.Lock()
+        self._recv_error: Optional[Exception] = None
 
     # --- connection --------------------------------------------------------
 
@@ -75,53 +87,116 @@ class PPSSPPClient:
         except (OSError, WebSocketException) as e:
             self._ws = None
             raise PPSSPPError(f"connect to {uri} failed: {e}") from e
+        self._stop_recv.clear()
+        self._recv_error = None
+        self._recv_thread = threading.Thread(
+            target=self._recv_loop, name="mhfu-hud-ws-drain", daemon=True)
+        self._recv_thread.start()
 
     def close(self):
-        if self._ws is not None:
+        self._stop_recv.set()
+        ws, self._ws = self._ws, None
+        # Wake parked waiters *first* so the reader thread can exit its
+        # in-flight _request immediately, before we touch the socket.
+        with self._pending_lock:
+            for slot in self._pending.values():
+                slot["event"].set()
+            self._pending.clear()
+        if ws is not None:
+            # close_socket() drops the underlying TCP socket without
+            # doing the WebSocket close handshake. The full close() would
+            # block on a peer ack — and when PPSSPP is itself shutting
+            # down the ack never comes, hanging both processes until
+            # force-quit. Force-shutdown is what we actually want here.
             try:
-                self._ws.close()
+                ws.close_socket()
             except Exception:
                 pass
-            self._ws = None
+            try:
+                ws.close()
+            except Exception:
+                pass
+        if self._recv_thread is not None and \
+                self._recv_thread is not threading.current_thread():
+            self._recv_thread.join(timeout=1.0)
+            self._recv_thread = None
 
     @property
     def connected(self) -> bool:
-        return self._ws is not None
+        return self._ws is not None and self._recv_error is None
+
+    # --- background drain --------------------------------------------------
+
+    def _recv_loop(self):
+        """Continuously drain the WebSocket. Park ticket replies into
+        `_pending`; discard everything else."""
+        while not self._stop_recv.is_set():
+            ws = self._ws
+            if ws is None:
+                break
+            try:
+                raw = ws.recv(timeout=0.5)
+            except TimeoutError:
+                continue
+            except (WebSocketException, OSError) as e:
+                self._recv_error = e
+                break
+            if raw is None or raw == "":
+                continue
+            try:
+                msg = json.loads(raw)
+            except (ValueError, TypeError):
+                continue
+            ticket = msg.get("ticket")
+            if not ticket:
+                # unsolicited notification — discard.
+                continue
+            with self._pending_lock:
+                slot = self._pending.pop(ticket, None)
+            if slot is not None:
+                slot["result"] = msg
+                slot["event"].set()
+            # else: late reply for a request that already timed out — drop.
+        # on exit, fail any still-pending waiters so they don't hang.
+        with self._pending_lock:
+            for slot in self._pending.values():
+                slot["event"].set()
+            self._pending.clear()
 
     # --- request/response --------------------------------------------------
 
     def _request(self, event: str, **params) -> dict:
         if self._ws is None:
             raise PPSSPPError("not connected")
+        if self._recv_error is not None:
+            raise PPSSPPError(f"recv loop dead: {self._recv_error}")
+
         ticket = uuid.uuid4().hex[:12]
+        evt = threading.Event()
+        slot = {"event": evt, "result": None}
+        with self._pending_lock:
+            self._pending[ticket] = slot
+
+        payload = json.dumps({"event": event, "ticket": ticket, **params})
         try:
-            self._ws.send(json.dumps({"event": event, "ticket": ticket,
-                                      **params}))
+            with self._send_lock:
+                self._ws.send(payload)
         except (WebSocketException, OSError) as e:
+            with self._pending_lock:
+                self._pending.pop(ticket, None)
             raise PPSSPPError(f"send {event}: {e}") from e
 
-        deadline = time.monotonic() + self.timeout
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise PPSSPPError(f"{event} timed out")
-            try:
-                raw = self._ws.recv(timeout=remaining)
-            except TimeoutError as e:
-                raise PPSSPPError(f"{event} timed out") from e
-            except (WebSocketException, OSError) as e:
-                raise PPSSPPError(f"{event}: {e}") from e
-            try:
-                msg = json.loads(raw)
-            except (ValueError, TypeError):
-                continue
-            # PPSSPP emits unsolicited input.analog / log / cpu events every
-            # frame — skip anything that is not the reply to our ticket.
-            if msg.get("ticket") != ticket:
-                continue
-            if msg.get("event") == "error":
-                raise PPSSPPError(msg.get("message", "debugger error"))
-            return msg
+        if not evt.wait(self.timeout):
+            with self._pending_lock:
+                self._pending.pop(ticket, None)
+            raise PPSSPPError(f"{event} timed out")
+        msg = slot["result"]
+        if msg is None:
+            # recv loop died while we were waiting.
+            raise PPSSPPError(f"{event} aborted: {self._recv_error}")
+        if msg.get("event") == "error":
+            raise PPSSPPError(msg.get("message", "debugger error"))
+        return msg
 
     # --- read-only API surface --------------------------------------------
 
