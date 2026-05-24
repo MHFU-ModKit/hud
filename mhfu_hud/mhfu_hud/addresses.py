@@ -37,7 +37,12 @@ MAP_SECTION      = 0x08A8DE4C   # u8  sub-section ID — see AREA_INDEX below.
 # 0x09999C5C, 0x09A04B6E, 0x09A44EF8 all carry the same value — confirms
 # the cell is a real area variable, not random heap noise.
 AREA_INDEX       = 0x08B0C7DC   # u16 visible-section index (per-quest map)
-QUEST_TIMER      = 0x09A05DD0   # u32 frames remaining (60 fps)
+QUEST_TIMER      = 0x09A05DD0   # u32 frames remaining (30 fps game-logic
+                                # rate — PSP runs MH logic at 30 Hz even
+                                # though display refreshes at 60 Hz).
+                                # Verified 2026-05-24 by slot-9 menu save:
+                                # cell read 89880 → 89880/30 = 2996 s =
+                                # 49:56 matching the in-game "VerblZeit".
 CARVE_COUNT      = 0x09A44C86   # u8  0 alive / 2 at kill / decrements per carve
 WEAPON_DRAWN     = 0x090B3A52   # u8  0 sheathed / 1 drawn
 # Player HP triple, pinned 2026-05-23 by live damage-diff on popo_quest_idle.

@@ -57,9 +57,16 @@ def draw_vitals(surface, rect, player):
                size=14, color=C.TEXT, bold=True, align="right")
 
 
+# Quest timer ticks at 30 Hz on PSP (game logic runs at 30 fps, half the
+# 60 Hz refresh). Verified 2026-05-24 with slot 9 save: cell read 89880
+# frames at save-load moment, matching the in-game "VerblZeit 49:56" =
+# 2996 s = 89880 / 30. Dividing by 60 would give 24:58 (the old bug).
+QUEST_TIMER_FPS = 30
+
+
 def fmt_timer(frames):
     """Quest timer frames -> 'MM:SS'."""
-    secs = max(0, frames) // 60
+    secs = max(0, frames) // QUEST_TIMER_FPS
     return f"{secs // 60:02d}:{secs % 60:02d}"
 
 

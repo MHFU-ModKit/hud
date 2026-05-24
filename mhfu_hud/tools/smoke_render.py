@@ -82,7 +82,7 @@ def quest_snapshot():
         connected=True, context=Context.QUEST, game_title="MHFU (ULES01213)",
         status_text="ok", screen_state=17, map_section=2, area_index=99,
         tracked_section=1, tracked_section_source="area_index",
-        scene_object_ptr=0x08A8C6E0, quest_timer_frames=60 * 60 * 35,
+        scene_object_ptr=0x08A8C6E0, quest_timer_frames=30 * 60 * 35,
         carve_count=0, player=player, monsters=monsters,
         camera_target=Vec3(18324, 320, 12833), poll_latency_ms=11.0,
         poll_count=421)
