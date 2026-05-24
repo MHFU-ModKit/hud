@@ -26,16 +26,28 @@ from ..theme import C, CANVAS_W, CANVAS_H
 from .base import Layout
 
 
-# Spawn block — discovered in Section 15.4 via diff of the three
-# quest_prep saves. Records are 64 bytes; first u32 is a header tag.
-SPAWN_BLOCK_BASE = 0x09A0B600
-SPAWN_BLOCK_SPAN = 0x400           # 16 records = 1024 bytes
+# Quest-state block at 0x09A0B610 — 16 records × 0x40 bytes each.
+# Section 15.6 (2026-05-24) follow-up: this is NOT the per-monster
+# spawn list. Evidence:
+#   - quest_prep_gather_day (no monsters) had 1 populated record
+#   - quest_prep_hunt_blangos (3 same-species Blangos) had 3 populated
+#     records but each with DIFFERENT content (would have been
+#     3 identical Blango entries if it were the species spawn list)
+#   - the varying byte at +0x0D/+0x0E ("monster type?") does NOT
+#     correlate with the species the user said is in each quest
+# What it IS: most plausibly a per-AREA cache (area attributes /
+# weather / lighting / lazy-load tracking), with the 4-record union
+# across the 4 saves being the areas the engine has fetched data for.
+# The actual per-monster spawn list is either lazy-deserialised only
+# at quest start, or stored in a region we have not isolated yet.
+SPAWN_BLOCK_BASE = 0x09A0B610
+SPAWN_BLOCK_SPAN = 0x400
 SPAWN_RECORD_SIZE = 0x40
 SPAWN_RECORD_COUNT = SPAWN_BLOCK_SPAN // SPAWN_RECORD_SIZE
 
 # Header u32 values observed:
 #   0x10000003  empty / default slot
-#   0x10000000  populated slot (carries monster spawn data)
+#   0x10000000  populated slot
 HEADER_EMPTY = 0x10000003
 HEADER_POPULATED = 0x10000000
 
@@ -76,7 +88,7 @@ class QuestPrepLayout(Layout):
 
     def _header(self, surface, snapshot):
         W.panel(surface, R_HEADER)
-        W.text(surface, "QUEST PREP — pre-quest spawn editor",
+        W.text(surface, "QUEST PREP — pre-quest state explorer (WIP)",
                (R_HEADER.x + 12, R_HEADER.y + 8), size=16,
                color=C.ACCENT, bold=True)
         ai = snapshot.area_index
@@ -89,12 +101,13 @@ class QuestPrepLayout(Layout):
 
     def _legend(self, surface):
         W.text(surface,
-               f"spawn block 0x{SPAWN_BLOCK_BASE:08X} .. "
+               f"quest-state block 0x{SPAWN_BLOCK_BASE:08X} .. "
                f"0x{SPAWN_BLOCK_BASE + SPAWN_BLOCK_SPAN:08X}  "
-               f"({SPAWN_RECORD_COUNT} records × 0x40 bytes)",
-               (R_LEGEND.x + 4, R_LEGEND.y + 4), size=12, color=C.TEXT)
+               f"({SPAWN_RECORD_COUNT} records × 0x40 bytes) — "
+               f"NOT the per-monster spawn list (see layout source)",
+               (R_LEGEND.x + 4, R_LEGEND.y + 4), size=12, color=C.WARN)
         W.text(surface,
-               "header 0x10000003 = empty   header 0x10000000 = populated",
+               "header 0x10000003 = empty   0x10000000 = populated",
                (R_LEGEND.x + 4, R_LEGEND.y + 18), size=11,
                color=C.TEXT_FAINT)
 
