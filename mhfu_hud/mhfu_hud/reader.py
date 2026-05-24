@@ -16,9 +16,24 @@ import threading
 import time
 
 from . import addresses as A
+from .calibration import Calibration
 from .monster_db import identify
 from .ppsspp import PPSSPPClient, PPSSPPError
-from .state import Context, GameSnapshot, MonsterHUD, PlayerHUD, Vec3
+from .state import BagSlot, Context, GameSnapshot, MonsterHUD, PlayerHUD, Vec3
+
+# The snow map is currently the only one with calibrated anchors. When
+# the section tracker can't tell which map we're on (no live indicator
+# yet), it assumes this slug — matches the active HUD default.
+_DEFAULT_QUEST_MAP_SLUG = "snowy_mountains"
+
+# Anchor-snap distance used when classifying the cam target right after
+# a gate transition. Spawn cells observed in the discovery run sat
+# within ~30 units of their nominal anchor — 1500 is generous slack.
+_SECTION_SNAP_DIST = 1500.0
+
+# Wait this long (seconds) after screen_state returns to 17 before we
+# trust cam_target as "settled on a spawn point" enough to snap.
+_SECTION_SETTLE_SECS = 0.6
 
 # Fallback bar maxima when a true cap has not been observed yet. The reader
 # tracks a running max from live values and prefers that.
@@ -60,6 +75,14 @@ class MemoryReader:
         self._stamina_max = 0
         self._game_title = ""
         self._game_loaded = False
+        # Section tracker — see _update_section. Survives across polls;
+        # reset by calling reset_section_tracking() from the HUD.
+        self._calib = Calibration()
+        self._tracked_section = None
+        self._tracked_section_source = "init"
+        self._last_screen_state = -1
+        self._settle_at = 0.0
+        self._pending_initial_snap = True
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -155,6 +178,10 @@ class MemoryReader:
         screen_state = a[A.SCREEN_STATE - a_base]
         stamina = struct.unpack_from("<H", a, A.STAMINA - a_base)[0]
         map_section = a[A.MAP_SECTION - a_base]
+        # Region A2: area_index (the real visible-section ID). Sits ~6 KiB
+        # above the previous region — separate read keeps region A small
+        # so we don't drag a full page worth of bytes per poll.
+        area_index = c.read_u16(A.AREA_INDEX)
 
         quest_timer = c.read_u32(A.QUEST_TIMER)
         carve = c.read_u8(A.CARVE_COUNT)
@@ -171,6 +198,22 @@ class MemoryReader:
         hp_recov, hp_max_live = struct.unpack_from(
             "<HH", b, A.PLAYER_HP_RECOV - b_base)
         weapon_drawn = bool(b[A.WEAPON_DRAWN - b_base])
+
+        # Bag — 24-slot in-quest inventory. One contiguous read (96 B)
+        # at BAG_BASE; each slot decodes as u32 LE
+        #     { item_id u16, count u8, flags u8 }.
+        # Pinned 2026-05-24 by diffing `bag_empty` (all zero) against
+        # `bag_one_paintball` (slot 0 = paintball, count 1).
+        bag_raw = c.read_memory(A.BAG_BASE, A.BAG_SPAN)
+        bag = []
+        for i in range(A.BAG_SLOT_COUNT):
+            raw = struct.unpack_from("<I", bag_raw, i * 4)[0]
+            bag.append(BagSlot(
+                idx=i,
+                item_id=raw & 0xFFFF,
+                count=(raw >> 16) & 0xFF,
+                flags=(raw >> 24) & 0xFF,
+            ))
 
         # Region C: player struct (vtable + position + rotation)
         pc = c.read_memory(A.PLAYER_STRUCT, A.PLAYER_STRUCT_SPAN)
@@ -218,6 +261,7 @@ class MemoryReader:
             stamina=stamina_render,
             stamina_max=self._stamina_max or STAMINA_MAX_FALLBACK,
             weapon_drawn=weapon_drawn if p_loaded else None,
+            bag=bag if p_loaded else [],
         )
 
         context = self._classify(screen_state, map_section, p_loaded, title)
@@ -226,14 +270,103 @@ class MemoryReader:
         if context == Context.QUEST:
             monsters = self._read_monsters(c)
 
+        # Section tracking — primary path is the area_index lookup;
+        # falls back to the gate-detected anchor snap when area_index is
+        # not yet in the learnt table.
+        self._update_section(screen_state, cam_target, p_loaded, context,
+                             area_index)
+
         return self._meta(GameSnapshot(
             connected=True, context=context, game_title=title,
             status_text="ok",
             screen_state=screen_state, map_section=map_section,
+            area_index=area_index,
             scene_object_ptr=scene_ptr,
+            tracked_section=self._tracked_section,
+            tracked_section_source=self._tracked_section_source,
             quest_timer_frames=quest_timer, carve_count=carve,
             player=player, monsters=monsters,
             camera_target=cam_target, camera_offset=cam_offset), t0)
+
+    def _update_section(self, screen_state, cam_target, p_loaded, context,
+                        area_index):
+        """Move the tracked-section state machine forward.
+
+        Primary signal: area_index (u16 at 0x08B0C7DC). Looked up in the
+        learnt area_index -> labelled section table every poll. While in
+        a quest, this gives the visible section directly — no anchor
+        snapping needed.
+
+        Secondary signal: gate transition (screen_state 17 -> !17 -> 17).
+        When the new area_index is *not* in the learnt table, we snap to
+        the nearest registered entry-point anchor and record the
+        (area_index -> section) pair so subsequent visits resolve
+        instantly without geometry.
+
+        An override set via set_section_override() takes priority over
+        both until the user clears it.
+        """
+        ls, ss = self._last_screen_state, screen_state
+        if context != Context.QUEST:
+            self._last_screen_state = ss
+            return
+        if self._tracked_section_source == "override":
+            self._last_screen_state = ss
+            return
+
+        # Primary: area_index lookup every poll.
+        if ss == 17 and area_index is not None:
+            sec, found = self._calib.section_from_area_index(
+                _DEFAULT_QUEST_MAP_SLUG, area_index)
+            if found:
+                self._tracked_section = sec
+                self._tracked_section_source = "area_index"
+
+        now = time.monotonic()
+        # Secondary: gate transition. Schedule a settle-then-snap so we
+        # can learn this area_index if it's novel.
+        if ls != -1 and ls != 17 and ss == 17:
+            self._settle_at = now + _SECTION_SETTLE_SECS
+        elif self._pending_initial_snap and ss == 17 and p_loaded:
+            self._settle_at = now + _SECTION_SETTLE_SECS
+            self._pending_initial_snap = False
+
+        if self._settle_at and now >= self._settle_at:
+            sec, dist = self._calib.section_from_world(
+                _DEFAULT_QUEST_MAP_SLUG, cam_target.x, cam_target.z,
+                max_dist=_SECTION_SNAP_DIST)
+            if sec is not None:
+                # Learn the area_index <-> section pairing if novel.
+                if (area_index is not None and
+                        not self._calib.section_from_area_index(
+                            _DEFAULT_QUEST_MAP_SLUG, area_index)[1]):
+                    if self._calib.learn_area_index(
+                            _DEFAULT_QUEST_MAP_SLUG, area_index, sec):
+                        # Persist the new mapping so subsequent runs and
+                        # tools see it.
+                        self._calib.save()
+                if (self._tracked_section_source != "area_index"
+                        or self._tracked_section is None):
+                    self._tracked_section = sec
+                    self._tracked_section_source = "transition"
+            self._settle_at = 0.0
+
+        self._last_screen_state = ss
+
+    def reset_section_tracking(self):
+        """Force a re-snap on the next stable poll. Called by the HUD
+        when the user explicitly drops the section override."""
+        self._tracked_section = None
+        self._tracked_section_source = "init"
+        self._pending_initial_snap = True
+        self._settle_at = 0.0
+
+    def set_section_override(self, section):
+        """Manual override from the HUD calibration mode."""
+        self._tracked_section = int(section) if section is not None else None
+        self._tracked_section_source = "override"
+        self._pending_initial_snap = False
+        self._settle_at = 0.0
 
     def _meta(self, snap: GameSnapshot, t0: float) -> GameSnapshot:
         snap.poll_latency_ms = (time.monotonic() - t0) * 1000.0
@@ -310,7 +443,15 @@ class MemoryReader:
         ai_324 = struct.unpack_from("<H", mb, A.OFF_M_AI_324)[0]
         ai_32c = struct.unpack_from("<H", mb, A.OFF_M_AI_32C)[0]
         name, slug = identify(type_byte)
+        category = A.monster_category(vtable)
+        # Tigrex was found with a "Tigrex"-named type but the same struct
+        # layout as small monsters — the docs warn that 0x1E8 varies by
+        # state. If category disagrees with the name, defer to category.
+        if category == "big" and name.startswith("Unknown"):
+            name = A.MONSTER_VTABLE_BIG.get(vtable, name)
+            slug = name.lower()
         return MonsterHUD(
             slot=slot, ptr=ptr, entity_id=entity_id, type_byte=type_byte,
             pos=pos, hp=hp, ai_behavior=ai_behav, ai_324=ai_324,
-            ai_32c=ai_32c, name=name, icon_slug=slug, hp_max=hp)
+            ai_32c=ai_32c, vtable=vtable, category=category,
+            name=name, icon_slug=slug, hp_max=hp)

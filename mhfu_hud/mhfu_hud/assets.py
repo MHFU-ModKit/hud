@@ -2,6 +2,7 @@
 
 Images live under assets/ (fetched by tools/fetch_assets.py):
   assets/monsters/      monster icons + manifest.json (slug -> filename)
+  assets/items/         item icons + manifest.json (slug -> filename)
   assets/maps/          per-location resource maps + manifest.json
   assets/backgrounds/   village background(s)
 Missing assets resolve to None; callers fall back to drawn placeholders.
@@ -15,6 +16,7 @@ import pygame
 _ROOT = Path(__file__).resolve().parent.parent
 ASSETS_DIR = _ROOT / "assets"
 MONSTERS_DIR = ASSETS_DIR / "monsters"
+ITEMS_DIR = ASSETS_DIR / "items"
 MAPS_DIR = ASSETS_DIR / "maps"
 BACKGROUNDS_DIR = ASSETS_DIR / "backgrounds"
 
@@ -34,6 +36,7 @@ class AssetLibrary:
         self._raw: dict = {}        # key -> Surface | None
         self._scaled: dict = {}     # (key, w, h) -> Surface
         self._monster_manifest = _load_manifest(MONSTERS_DIR / "manifest.json")
+        self._item_manifest = _load_manifest(ITEMS_DIR / "manifest.json")
         self._map_manifest = _load_manifest(MAPS_DIR / "manifest.json")
 
     # --- loading -----------------------------------------------------------
@@ -55,6 +58,12 @@ class AssetLibrary:
             return None
         fname = self._monster_manifest.get(slug, f"{slug}.png")
         return self._load(f"mon:{slug}", MONSTERS_DIR / fname)
+
+    def item_icon(self, slug):
+        if not slug:
+            return None
+        fname = self._item_manifest.get(slug, f"{slug}.png")
+        return self._load(f"itm:{slug}", ITEMS_DIR / fname)
 
     def map_image(self, slug):
         if not slug:

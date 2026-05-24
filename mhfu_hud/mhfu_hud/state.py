@@ -42,9 +42,32 @@ class MonsterHUD:
     ai_behavior: int
     ai_324: int
     ai_32c: int
+    vtable: int = 0
+    # "small" / "big" / "unknown" — classified by vtable
+    # (`addresses.monster_category`). Big monsters get a dedicated roster
+    # section + larger map marker; small monsters cluster under the
+    # current section.
+    category: str = "small"
     name: str = "Unknown"
     icon_slug: Optional[str] = None
     hp_max: int = 0                 # running max observed this session
+
+
+@dataclass(frozen=True)
+class BagSlot:
+    """One slot of the in-quest player bag.
+
+    Layout: u32 LE at `BAG_BASE + idx*4` = { item_id u16, count u8, flags u8 }.
+    Empty slots read as raw=0, item_id=0, count=0.
+    """
+    idx: int
+    item_id: int
+    count: int
+    flags: int
+
+    @property
+    def empty(self) -> bool:
+        return self.item_id == 0 and self.count == 0
 
 
 @dataclass
@@ -59,6 +82,9 @@ class PlayerHUD:
     stamina: Optional[int] = None
     stamina_max: int = 0
     weapon_drawn: Optional[bool] = None
+    # Full in-quest bag (Section 12 — pinned 2026-05-24). 24 entries
+    # always present; empty slots have item_id=0, count=0.
+    bag: List["BagSlot"] = field(default_factory=list)
 
 
 @dataclass
@@ -72,9 +98,17 @@ class GameSnapshot:
     timestamp: float = 0.0
     # raw oracles
     screen_state: int = -1
-    map_section: int = -1
+    map_section: int = -1                # raw byte at 0x08A8DE4C — sub-section
+    area_index: int = -1                 # u16 at 0x08B0C7DC — the real
+                                         # visible-section index. Maps to
+                                         # the labelled section via the
+                                         # learnt table (see Calibration).
     scene_object_ptr: int = 0
     context: Context = Context.DISCONNECTED
+    # Tracked visible section. Primary source: area_index lookup. Falls
+    # back to gate-detected anchor snap when area_index is unmapped.
+    tracked_section: Optional[int] = None
+    tracked_section_source: str = "init"  # "area_index"|"transition"|"override"|"init"
     # gameplay
     quest_timer_frames: int = 0
     carve_count: int = 0

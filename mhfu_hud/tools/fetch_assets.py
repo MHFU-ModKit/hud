@@ -6,15 +6,17 @@ Downloads, into mhfu_hud/assets/:
   maps/snowy_mountains.png  the Snowy Mountains resource map (fixed URL)
   maps/<location>.png       best-effort resource maps for other locations
   monsters/<slug>.png       monster icons scraped from the MHFU monster list
+  items/<slug>.png          item icons scraped from MHFU:_Item_List
 
 All images are normalised to PNG via Pillow (handles webp/gif/jpg sources).
 Each directory gets a manifest.json (slug -> filename). Network failures are
 logged and skipped — the HUD falls back to drawn placeholders.
 
 Usage:
-    python tools/fetch_assets.py            # full fetch
-    python tools/fetch_assets.py --quick    # only the two fixed-URL assets
-    python tools/fetch_assets.py --no-maps  # skip per-location map scraping
+    python tools/fetch_assets.py             # full fetch
+    python tools/fetch_assets.py --quick     # only the two fixed-URL assets
+    python tools/fetch_assets.py --no-maps   # skip per-location map scraping
+    python tools/fetch_assets.py --no-items  # skip item icon scraping
 """
 
 import argparse
@@ -324,6 +326,89 @@ def fetch_monsters(*, clean=True):
     print(f"· monsters manifest: {len(manifest)} icons")
 
 
+def _strip_html(s):
+    """Crude HTML -> text for the item-name cell."""
+    s = re.sub(r"<br\s*/?>", " ", s, flags=re.I)
+    s = re.sub(r"<[^>]+>", "", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def scrape_items():
+    """Parse MHFU:_Item_List via the MediaWiki API and return
+    [(display_name, image_filename), ...].
+
+    Cloudflare blocks raw HTML scrapes of the wiki page, but the
+    `api.php?action=parse` endpoint stays reachable. Each table row's
+    first <td> has an <img data-image-name="…"> with the wiki filename;
+    the second <td> is the item display name. We pair them per row.
+    """
+    api = (f"{WIKI}/api.php?action=parse&page=MHFU:_Item_List"
+           f"&format=json&prop=text")
+    raw = http_get(api)
+    text = json.loads(raw)["parse"]["text"]["*"]
+    rows = re.findall(r"<tr[^>]*>(.*?)</tr>", text, re.S)
+    out = []
+    seen = set()
+    for row in rows:
+        tds = re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)
+        if len(tds) < 2:
+            continue
+        m_img = re.search(r'data-image-name="([^"]+)"', tds[0])
+        if not m_img:
+            continue
+        fname = m_img.group(1).replace(" ", "_")
+        name = _strip_html(tds[1])
+        if not name or name.lower() == "name":   # header row
+            continue
+        # collapse parenthetical suffix and duplicates
+        plain = re.sub(r"\s+\(.*?\)$", "", name).strip()
+        key = (plain.lower(), fname.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((plain, fname))
+    return out
+
+
+def fetch_items(*, clean=True):
+    """Pull every item icon from the MHFU:_Item_List page.
+
+    Each item gets its own PNG at assets/items/<slug>.png. The manifest
+    maps slug -> filename so the HUD can render `bag` slots by item
+    name once the ID -> name table is filled in (Section 12.7).
+    """
+    items_dir = ASSETS / "items"
+    items_dir.mkdir(parents=True, exist_ok=True)
+    if clean:
+        removed = 0
+        for stale in items_dir.glob("*.png"):
+            stale.unlink()
+            removed += 1
+        if removed:
+            print(f"· cleaned {removed} stale icon(s) from {items_dir}")
+
+    try:
+        items = scrape_items()
+    except Exception as e:                           # noqa: BLE001
+        print(f"  ! item scrape failed: {e}")
+        return
+    print(f"· {len(items)} items — downloading …")
+    manifest = {}
+    for n, (name, fname) in enumerate(sorted(items), 1):
+        slug = slugify(name)
+        if not slug:
+            continue
+        try:
+            data = http_get(wikia_cdn_url(fname, scale=64))
+            save_image(data, items_dir / f"{slug}.png", max_side=64)
+            manifest[slug] = f"{slug}.png"
+            print(f"  ✓ [{n}/{len(items)}] {name} -> {slug}")
+        except Exception as e:                       # noqa: BLE001
+            print(f"  ! [{n}/{len(items)}] {name}: {e}")
+    write_manifest(items_dir, manifest)
+    print(f"· items manifest: {len(manifest)} icons")
+
+
 def fetch_maps():
     print("· per-location resource maps …")
     manifest = {"snowy_mountains": "snowy_mountains.png"}
@@ -354,15 +439,25 @@ def main():
                     help="skip per-location map scraping")
     ap.add_argument("--no-monsters", action="store_true",
                     help="skip monster icon scraping")
+    ap.add_argument("--no-items", action="store_true",
+                    help="skip item icon scraping")
+    ap.add_argument("--only-items", action="store_true",
+                    help="run only the item-icon fetch (skip everything else)")
     args = ap.parse_args()
 
     ASSETS.mkdir(exist_ok=True)
+    if args.only_items:
+        fetch_items()
+        print("done (items only).")
+        return
     fetch_fixed()
     if args.quick:
         print("done (quick mode).")
         return
     if not args.no_monsters:
         fetch_monsters()
+    if not args.no_items:
+        fetch_items()
     if not args.no_maps:
         fetch_maps()
     print("done.")

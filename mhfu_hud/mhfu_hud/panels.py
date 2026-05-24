@@ -67,15 +67,19 @@ def draw_raw_strip(surface, rect, snapshot):
     """A row of raw memory oracles — the debug truth behind the HUD."""
     rect = pygame.Rect(rect)
     W.panel(surface, rect, fill=C.PANEL)
+    big_count = sum(1 for m in snapshot.monsters if m.category == "big")
+    small_count = len(snapshot.monsters) - big_count
+    bag_used = sum(1 for s in snapshot.player.bag if not s.empty)
+    bag_total = len(snapshot.player.bag) or 24
     cells = [
         ("CONTEXT", snapshot.context.value),
         ("SCREEN", snapshot.screen_state),
         ("MAP SEC", snapshot.map_section),
         ("SCENE PTR", f"0x{snapshot.scene_object_ptr:08X}"),
         ("CARVE", snapshot.carve_count),
-        ("MONSTERS", len(snapshot.monsters)),
+        ("MON s/b", f"{small_count}/{big_count}"),
+        ("BAG", f"{bag_used}/{bag_total}"),
         ("POLL ms", f"{snapshot.poll_latency_ms:.0f}"),
-        ("POLLS", snapshot.poll_count),
     ]
     cw = rect.width / len(cells)
     for i, (label, value) in enumerate(cells):
