@@ -51,6 +51,11 @@ class MonsterHUD:
     name: str = "Unknown"
     icon_slug: Optional[str] = None
     hp_max: int = 0                 # running max observed this session
+    # Per-entity scale multiplier (f32 at +0x024). Set when monster
+    # spawns; popos in {0.8, 1.1}, antekas uniformly 1.3, Tigrex 0.9 —
+    # see addresses.OFF_M_SIZE_SCALE for the discovery notes. Renders
+    # next to HP / name in the monster panels.
+    size_scale: Optional[float] = None
 
 
 @dataclass(frozen=True)

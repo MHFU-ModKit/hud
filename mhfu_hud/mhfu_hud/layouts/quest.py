@@ -404,7 +404,13 @@ class QuestLayout(Layout):
                                  (row.x + 4, row.y + 4))
                 W.text(surface, m.name, (row.x + 40, row.y + 4), size=13,
                        color=C.TEXT, bold=True)
-                W.text(surface, f"slot {m.slot}", (row.x + 40, row.y + 21),
+                # slot + size chip on the second line. Size is the
+                # per-entity scale multiplier pinned 2026-05-24
+                # (addresses.OFF_M_SIZE_SCALE).
+                size_str = ("?" if m.size_scale is None
+                            else f"{m.size_scale:.2f}×")
+                W.text(surface, f"slot {m.slot}  ·  size {size_str}",
+                       (row.x + 40, row.y + 21),
                        size=10, color=C.TEXT_FAINT)
                 hp_max = max(1, m.hp_max)
                 W.bar(surface, (row.x + 96, row.y + 22, row.w - 104, 8),
@@ -493,11 +499,13 @@ class QuestLayout(Layout):
                size=11, color=C.TEXT, bold=True, align="center")
 
         dist = self._distance(m, snapshot.player)
+        size_str = "?" if m.size_scale is None else f"{m.size_scale:.3f}×"
         rows = [
             ("Slot", m.slot),
             ("Pointer", f"0x{m.ptr:08X}"),
             ("Type byte", f"0x{m.type_byte:02X}"),
             ("Entity ID", f"0x{m.entity_id:02X}"),
+            ("Size scale", size_str),
             ("AI behavior", m.ai_behavior),
             ("AI 0x324", m.ai_324),
             ("AI 0x32C", m.ai_32c),
@@ -536,12 +544,15 @@ class QuestLayout(Layout):
                size=12, color=C.TEXT)
 
         dist = self._distance(m, player)
+        size_str = ("?" if m.size_scale is None
+                    else f"{m.size_scale:.4f}  (×base)")
         rows = [
             ("Display name", m.name),
             ("Registry slot", m.slot),
             ("Entity pointer", f"0x{m.ptr:08X}"),
             ("Type byte (+0x1E8)", f"0x{m.type_byte:02X}  (unreliable)"),
             ("Entity ID (+0x1E4)", f"0x{m.entity_id:02X}"),
+            ("Size scale (+0x024)", size_str),
             ("AI behavior (+0x334)", m.ai_behavior),
             ("AI param (+0x324)", m.ai_324),
             ("AI param (+0x32C)", m.ai_32c),

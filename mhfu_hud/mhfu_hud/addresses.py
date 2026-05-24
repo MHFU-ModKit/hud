@@ -80,7 +80,27 @@ OFF_M_AI_324    = 0x324         # u16
 OFF_M_AI_32C    = 0x32C         # u16
 OFF_M_AI_BEHAV  = 0x334         # u16
 OFF_M_DAMAGE_Q  = 0x3B8         # u32
+# Per-entity scale multiplier (f32). Pinned 2026-05-24 (Section 14) by
+# diffing 3 popo loads (edge_to_s1, edge_to_s7) against 3 anteka loads
+# (edge_to_s6): popos read {0.8, 1.1} per entity (variable), antekas all
+# read 1.3 (uniform), Tigrex reads 0.9 (tigrex_s6 dump). Five offsets
+# mirror the same value — 0x024, 0x220, 0x224, 0x228, 0x270. 0x024 is
+# the canonical source (earliest in struct, set at spawn from quest
+# data); 0x220..0x228 looks like the per-axis render-scale vec3
+# (x=y=z=scale); 0x270 is likely a cached bounding-sphere radius. HUD
+# reads 0x024 as the displayed "Size" value.
+OFF_M_SIZE_SCALE = 0x024        # f32 per-entity scale multiplier
 MONSTER_STRUCT_SPAN = 0x3C0     # bytes to slurp per monster
+# Small-monster vtables. Each *species* in the small class has its own
+# vtable — Popo and Anteka share the registry / offset layout but
+# different vtable. Add new ones as they are observed live (Velociprey,
+# Giaprey, Vespoid, etc.).
+MONSTER_VTABLES_SMALL = {
+    0x089BC560: "small_popo",      # Popo / Velociprey-class — pinned earlier
+    0x089BC074: "small_anteka",    # Anteka — pinned 2026-05-24 Section 14
+}
+# Back-compat alias — the old single-value name still resolves to the
+# Popo vtable so older scripts keep working.
 MONSTER_VTABLE_SMALL = 0x089BC560
 
 # Big-monster vtables. Big monsters share the same entity registry
@@ -98,12 +118,12 @@ def monster_category(vtable: int) -> str:
     """Classify a monster entity by vtable.
 
     Returns:
-      "small" — small_monster class (Popo, Velociprey-class, Giaprey…),
+      "small" — small_monster class (Popo, Anteka, Velociprey-class…),
       "big"   — confirmed large-monster vtable (Tigrex, …),
       "unknown" — entity that doesn't match either pool; treat as small
                   in UI but flag for follow-up.
     """
-    if vtable == MONSTER_VTABLE_SMALL:
+    if vtable in MONSTER_VTABLES_SMALL:
         return "small"
     if vtable in MONSTER_VTABLE_BIG:
         return "big"

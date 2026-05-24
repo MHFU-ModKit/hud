@@ -442,6 +442,11 @@ class MemoryReader:
         ai_behav = struct.unpack_from("<H", mb, A.OFF_M_AI_BEHAV)[0]
         ai_324 = struct.unpack_from("<H", mb, A.OFF_M_AI_324)[0]
         ai_32c = struct.unpack_from("<H", mb, A.OFF_M_AI_32C)[0]
+        size_scale = struct.unpack_from("<f", mb, A.OFF_M_SIZE_SCALE)[0]
+        # Reject NaN / absurd values — render as None so the panel can
+        # show "?" rather than burning a slot with garbage.
+        if not (size_scale == size_scale and 0.05 < size_scale < 10.0):
+            size_scale = None
         name, slug = identify(type_byte)
         category = A.monster_category(vtable)
         # Tigrex was found with a "Tigrex"-named type but the same struct
@@ -454,4 +459,4 @@ class MemoryReader:
             slot=slot, ptr=ptr, entity_id=entity_id, type_byte=type_byte,
             pos=pos, hp=hp, ai_behavior=ai_behav, ai_324=ai_324,
             ai_32c=ai_32c, vtable=vtable, category=category,
-            name=name, icon_slug=slug, hp_max=hp)
+            name=name, icon_slug=slug, hp_max=hp, size_scale=size_scale)
