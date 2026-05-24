@@ -195,8 +195,9 @@ class MemoryReader:
         carve = c.read_u8(A.CARVE_COUNT)
 
         # Region B: player heap block — one read covers current HP
-        # (0x090B3724), recov+max pair (0x090B385C..0x090B385F), and the
-        # weapon-drawn flag (0x090B3A52). Coalesced into a single fetch
+        # (0x090B3724), recov+max pair (0x090B385C..0x090B385F), the
+        # weapon-drawn flag (0x090B3A52), the sharpness tier (0x090B3A32)
+        # and sharpness max (0x090B3A4C). Coalesced into a single fetch
         # so the poll cycle stays cheap on the PPSSPP debugger socket
         # (a flood of small reads visibly hitches emulation).
         b_base = 0x090B3700
@@ -206,6 +207,13 @@ class MemoryReader:
         hp_recov, hp_max_live = struct.unpack_from(
             "<HH", b, A.PLAYER_HP_RECOV - b_base)
         weapon_drawn = bool(b[A.WEAPON_DRAWN - b_base])
+        sharp_tier = b[A.SHARPNESS_TIER - b_base]
+        sharp_max = struct.unpack_from("<H", b, A.SHARPNESS_MAX - b_base)[0]
+        # Current sharpness lives ~3 KiB above B's tail (0x090B4532); the
+        # B-block ends at 0x090B3B00, so do a tiny single-u16 read for it.
+        # This stays cheap (one round-trip) and avoids inflating Region B
+        # to 0x1000 bytes per poll.
+        sharp_cur = c.read_u16(A.SHARPNESS_CURRENT)
 
         # Bag — 24-slot in-quest inventory. One contiguous read (96 B)
         # at BAG_BASE; each slot decodes as u32 LE
@@ -269,6 +277,11 @@ class MemoryReader:
             stamina=stamina_render,
             stamina_max=self._stamina_max or STAMINA_MAX_FALLBACK,
             weapon_drawn=weapon_drawn if p_loaded else None,
+            sharpness=sharp_cur if p_loaded and 0 < sharp_cur <= 4000 else None,
+            sharpness_max=(sharp_max if p_loaded and 0 < sharp_max <= 4000
+                           else None),
+            sharpness_tier=(sharp_tier if p_loaded and sharp_tier < 7
+                            else None),
             bag=bag if p_loaded else [],
         )
 

@@ -59,6 +59,7 @@ def quest_snapshot():
         pos_local=Vec3(5, 156, -2), facing_rad=0.6,
         hp=74, hp_recov=88, hp_max=100,
         stamina=214, stamina_max=320, weapon_drawn=True,
+        sharpness=80, sharpness_max=150, sharpness_tier=1,
         bag=bag)
     monsters = [
         MonsterHUD(slot=1, ptr=0x090BD530, entity_id=0x01, type_byte=0x4B,

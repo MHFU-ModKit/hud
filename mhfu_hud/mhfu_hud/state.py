@@ -87,6 +87,12 @@ class PlayerHUD:
     stamina: Optional[int] = None
     stamina_max: int = 0
     weapon_drawn: Optional[bool] = None
+    # Sharpness (Section 16 — pinned 2026-05-24). `sharpness` is the live
+    # unit counter, `sharpness_max` the weapon's ceiling, `sharpness_tier`
+    # the index into addresses.SHARPNESS_TIER_NAMES (0=red .. 6=purple).
+    sharpness: Optional[int] = None
+    sharpness_max: Optional[int] = None
+    sharpness_tier: Optional[int] = None
     # Full in-quest bag (Section 12 — pinned 2026-05-24). 24 entries
     # always present; empty slots have item_id=0, count=0.
     bag: List["BagSlot"] = field(default_factory=list)

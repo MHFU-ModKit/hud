@@ -241,7 +241,7 @@ class QuestLayout(Layout):
         self._timer_panel(surface, snapshot)
         self._map_panel(surface, snapshot)
         self._roster_panel(surface, snapshot)
-        self._sharpness_panel(surface)
+        self._sharpness_panel(surface, snapshot)
         # Pick the detail rect on the fly: when bag is hidden, detail
         # eats the bag's rect too. _detail_panel + _bag_panel read this
         # via self._detail_rect / self._bag_rect.
@@ -329,12 +329,50 @@ class QuestLayout(Layout):
         W.text(surface, f"{frames} frames", (R_TIMER.centerx, R_TIMER.y + 66),
                size=11, color=C.TEXT_FAINT, align="center")
 
-    def _sharpness_panel(self, surface):
+    # Sharpness-tier colors. Indexed by addresses.SHARPNESS_TIER (0..6).
+    # MH tier order: red < orange < yellow < green < blue < white < purple.
+    _SHARP_TIER_COLOR = (
+        (220,  64,  56),    # red
+        (228, 132,  44),    # orange
+        (232, 200,  72),    # yellow
+        (108, 196,  92),    # green
+        ( 86, 156, 232),    # blue
+        (228, 232, 240),    # white
+        (188, 116, 220),    # purple
+    )
+
+    def _sharpness_panel(self, surface, snapshot):
         W.panel(surface, R_SHARP, title="SHARPNESS")
-        W.placeholder_box(surface, (R_SHARP.x + 12, R_SHARP.y + 30,
-                                    R_SHARP.w - 24, 18), "")
-        W.text(surface, "not parsed yet", (R_SHARP.centerx, R_SHARP.y + 52),
-               size=11, color=C.PLACEHOLDER, align="center")
+        p = snapshot.player
+        cur, mx, tier = p.sharpness, p.sharpness_max, p.sharpness_tier
+        bar_rect = (R_SHARP.x + 12, R_SHARP.y + 32, R_SHARP.w - 24, 18)
+        if cur is None or mx is None or mx <= 0:
+            W.placeholder_box(surface, bar_rect, "")
+            label = ("not loaded" if not p.loaded else
+                     "no live read")
+            W.text(surface, label,
+                   (R_SHARP.centerx, R_SHARP.y + 56),
+                   size=11, color=C.PLACEHOLDER, align="center")
+            return
+        # Bar — coloured by tier; segments above the current tier are
+        # rendered as muted fill so you can see headroom even if you've
+        # used a tier of sharpness. Simpler "single-colour current bar
+        # over a dark back" works fine without a per-tier breakdown.
+        frac = cur / mx
+        idx = tier if tier is not None and 0 <= tier < 7 else 2
+        color = self._SHARP_TIER_COLOR[idx]
+        W.bar(surface, bar_rect, frac, color)
+        # Tier name + numeric. Tier could be None during a transient
+        # zone-load — fall back to "?" rather than crash.
+        from .. import addresses as A
+        tier_name = (A.SHARPNESS_TIER_NAMES[tier]
+                     if tier is not None and 0 <= tier < 7 else "?")
+        W.text(surface, tier_name,
+               (R_SHARP.x + 14, R_SHARP.y + 54),
+               size=14, color=color, bold=True)
+        W.text(surface, f"{cur} / {mx}",
+               (R_SHARP.right - 14, R_SHARP.y + 54),
+               size=14, color=C.TEXT, bold=True, align="right")
 
     def _map_panel(self, surface, snapshot):
         W.panel(surface, R_MAP, fill=C.BG)

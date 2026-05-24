@@ -56,6 +56,30 @@ PLAYER_HP_MAX    = 0x090B385E   # u16 max HP (constant unless armor / meal
                                 #     changes it).
 ENTITY_ARRAY     = 0x09C1213C   # u32[~21] monster entity pointers
 
+# --- Weapon sharpness (Section 16, pinned 2026-05-24) ----------------------
+# Discovered by diffing three saves at different sharpness states:
+# `sharpness_max` (slot 10) / `sharpness_mid_tier` (slot 9) /
+# `sharpness_lowest_tier` (slot 8). The diff hunted u16 cells satisfying
+# val10 > val9 > val8 across the 128 KiB player heap region — exactly ONE
+# aligned u16 matched: 0x090B4532 with values 150 / 80 / 50, the textbook
+# pattern for "max yellow / just-into-orange / just-into-red" on a
+# yellow-base weapon. Max-sharpness u16 found at 0x090B3A4C (= 150,
+# constant across all three saves). Current tier u8 found at 0x090B3A32
+# (2 / 1 / 0 across the three saves — index into red / orange / yellow /
+# green / blue / white / purple).
+#
+# Note: 0x090B4532 was listed in earlier notes as a "wrong HP guess that
+# stayed at 149 through ten body-checks" — that observation actually
+# CONFIRMS sharpness, because body-checks don't consume sharpness.
+SHARPNESS_CURRENT = 0x090B4532  # u16 — current units, decremented per hit
+SHARPNESS_MAX     = 0x090B3A4C  # u16 — weapon ceiling, only changes on
+                                #       equip / whetstone full-restore
+SHARPNESS_TIER    = 0x090B3A32  # u8  — 0=red 1=orange 2=yellow 3=green
+                                #       4=blue 5=white 6=purple
+SHARPNESS_TIER_NAMES = (
+    "Red", "Orange", "Yellow", "Green", "Blue", "White", "Purple",
+)
+
 VILLAGE_MAP_SECTION = 35
 ENTITY_MAX_SLOTS = 21
 
