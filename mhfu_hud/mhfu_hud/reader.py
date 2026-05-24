@@ -17,6 +17,7 @@ import time
 
 from . import addresses as A
 from .calibration import Calibration
+from .edits import EditBank
 from .monster_db import identify
 from .ppsspp import PPSSPPClient, PPSSPPError
 from .state import BagSlot, Context, GameSnapshot, MonsterHUD, PlayerHUD, Vec3
@@ -83,6 +84,13 @@ class MemoryReader:
         self._last_screen_state = -1
         self._settle_at = 0.0
         self._pending_initial_snap = True
+        # Staged-edit bank — written by the QUEST-PREP layout (UI thread)
+        # and read by the reader thread during _poll's apply step.
+        # Section 15.14: the user authors edits while in the village,
+        # and they auto-apply to entities the moment they spawn in
+        # the quest area.
+        self.edit_bank = EditBank()
+        self._was_in_quest_with_entities = False
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -270,6 +278,16 @@ class MemoryReader:
         if context == Context.QUEST:
             monsters = self._read_monsters(c)
 
+        # Auto-apply staged edits (Section 15.14). The edit bank is
+        # owned by the HUD app's QUEST-PREP layout; the user authors
+        # entries while still in the village, and we apply them to
+        # each freshly-spawned monster the moment it appears in the
+        # registry. The bank tracks which entity pointers it has
+        # already written to, so monsters only get the edit applied
+        # ONCE per spawn — letting the user further tweak values
+        # live (with QUEST tab +/-) without us clobbering it back.
+        self._maybe_apply_edits(monsters, context, screen_state)
+
         # Section tracking — primary path is the area_index lookup;
         # falls back to the gate-detected anchor snap when area_index is
         # not yet in the learnt table.
@@ -352,6 +370,28 @@ class MemoryReader:
             self._settle_at = 0.0
 
         self._last_screen_state = ss
+
+    def _maybe_apply_edits(self, monsters, context, screen_state):
+        """Apply pending staged edits. Reset the bank's applied set on
+        every NEW quest-area entry (screen_state crosses into 17 with
+        monsters present) so the same edits re-fire on a fresh quest
+        instance (recycled entity pointers)."""
+        if self._client is None:
+            return
+        now_has = (context == Context.QUEST and screen_state == 17
+                   and bool(monsters))
+        if now_has and not self._was_in_quest_with_entities:
+            # Fresh quest-area entry — clear applied-to so the edits
+            # re-fire on the new entity instances.
+            self.edit_bank.reset_applied()
+        self._was_in_quest_with_entities = now_has
+        if monsters:
+            try:
+                self.edit_bank.apply_to_monsters(self._client, monsters, A)
+            except Exception:
+                # Bad writes shouldn't kill the poll loop; the next
+                # cycle retries unmarked entities.
+                pass
 
     def reset_section_tracking(self):
         """Force a re-snap on the next stable poll. Called by the HUD
