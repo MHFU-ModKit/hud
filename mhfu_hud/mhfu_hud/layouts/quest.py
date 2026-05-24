@@ -452,9 +452,25 @@ class QuestLayout(Layout):
         icon; unknown IDs fall back to a `0xNNNN` hex chip. Stack count
         prints in the bottom-right of every filled cell. Empty slots
         stay dim.
+
+        Live-update note: the polled bag is the IN-QUEST bag at
+        BAG_BASE (`0x090B39A8`, pinned 2026-05-24). It updates when
+        you consume / pick up items during a quest. While still in the
+        village it is the "prefetched" bag staged for the next quest;
+        consuming items at the village item-box does NOT touch this
+        cell (that's a different heap address). The header shows the
+        live poll number so it is obvious whether the reader is
+        actually polling.
         """
         from .. import item_db
-        W.panel(surface, R_BAG, title="BAG")
+        W.panel(surface, self._bag_rect, title="BAG")
+        # Live-poll indicator: small chip showing the current poll
+        # number so the user can confirm the reader is alive even when
+        # bag contents look static (e.g. in village or with the bag
+        # not yet allocated). Watch this number tick up while playing.
+        W.text(surface, f"poll #{snapshot.poll_count}",
+               (self._bag_rect.right - 8, self._bag_rect.y + 6),
+               size=10, color=C.TEXT_FAINT, align="right")
         bag = snapshot.player.bag
         cols = 6
         rows = 4

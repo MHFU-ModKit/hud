@@ -10,23 +10,35 @@ import pygame
 from . import panels, widgets as W
 from .assets import AssetLibrary
 from .calibration import Calibration
-from .layouts import QuestLayout, VillageLayout
+from .layouts import QuestLayout, QuestPrepLayout, VillageLayout
 from .state import Context
 from .theme import C, CANVAS_W, CANVAS_H
 
 WINDOW_TITLE = "MHFU Live HUD"
 GAMEPLAY = {Context.VILLAGE, Context.QUEST}
 
+# Tab modes. The HUD shows ONE tab at a time. LIVE is the default
+# (auto-pick layout from snapshot context). QUEST_PREP is the spawn-
+# editor mode — auto-selected when the player is in the village AND
+# the prefetched quest data is present (heuristic: area_index != 0 in
+# village). TAB toggles manually; auto-switch happens once on context
+# entry but never overrides a manual choice.
+TAB_LIVE = "live"
+TAB_QUEST_PREP = "quest_prep"
+
 _HELP = [
     ("F1", "toggle this help"),
     ("F2 / F3 / F4", "layout: auto / force village / force quest"),
     ("F11", "toggle fullscreen"),
     ("ESC", "close overlay, or quit"),
+    ("TAB", "switch LIVE / QUEST-PREP tabs"),
     ("", ""),
-    ("TAB  or  ]", "select next monster (quest)"),
-    ("[", "select previous monster (quest)"),
+    ("B", "toggle bag panel (quest)"),
+    ("] / [", "select next / previous monster (quest)"),
     ("ENTER", "open / close monster detail page"),
     ("M", "cycle map image (quest)"),
+    ("", ""),
+    ("↑ / ↓", "cycle spawn record (quest-prep)"),
     ("", ""),
     ("C", "toggle calibration mode"),
     ("+  /  -", "calib: map scale"),
@@ -60,7 +72,16 @@ class HUDApp:
             Context.QUEST: QuestLayout(self.assets, self.calib,
                                        reader=self.reader),
         }
+        self.quest_prep = QuestPrepLayout(self.assets, self.calib,
+                                          reader=self.reader)
         self.forced = None          # Context or None (= auto)
+        # Tab state — TAB_LIVE = follow context (village / quest /
+        # status screen). TAB_QUEST_PREP = show the spawn-editor.
+        # `_tab_user_pinned` tracks whether the current tab was set by
+        # the user (TAB key) so auto-switch can stay out of the way.
+        self.tab = TAB_LIVE
+        self._tab_user_pinned = False
+        self._last_quest_prep_eligible = False
         self.show_help = False
         self.running = True
         self._blit_off = (0, 0)
@@ -94,8 +115,8 @@ class HUDApp:
         return self.forced if self.forced is not None else snap.context
 
     def _handle_events(self, snap):
-        ctx = self._context(snap)
-        layout = self.layouts.get(ctx)
+        self._maybe_auto_switch_tab(snap)
+        layout = self._active_layout(snap)
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
                 self.running = False
@@ -107,6 +128,42 @@ class HUDApp:
                     layout.handle_click(self._to_canvas(ev.pos), snap)
             elif ev.type == pygame.KEYDOWN:
                 self._handle_key(ev.key, snap, layout)
+
+    def _quest_prep_eligible(self, snap) -> bool:
+        """Heuristic: in village context (or boot/menu/loading) with a
+        non-zero area_index — the engine prefetches the quest's area
+        index even before the hunter walks out of the village, so a
+        nonzero value while still in village means a quest is queued."""
+        if snap.context == Context.QUEST:
+            return False
+        return snap.area_index not in (0, -1)
+
+    def _maybe_auto_switch_tab(self, snap):
+        """Auto-flip to QUEST_PREP on the FRAME the prep state becomes
+        true (and back to LIVE when it lapses), but only if the user
+        has not manually pinned a tab. Once the player enters the
+        quest, the pin clears so manual choices reset."""
+        eligible = self._quest_prep_eligible(snap)
+        if snap.context == Context.QUEST:
+            # Reset pin on quest entry so the next prep-cycle starts fresh
+            self._tab_user_pinned = False
+        if not self._tab_user_pinned:
+            if eligible and not self._last_quest_prep_eligible:
+                self.tab = TAB_QUEST_PREP
+            elif not eligible and self._last_quest_prep_eligible:
+                self.tab = TAB_LIVE
+        self._last_quest_prep_eligible = eligible
+
+    def _active_layout(self, snap):
+        """Layout currently driving keys + click hits.
+
+        QUEST_PREP overlays the context-driven layouts; when active it
+        owns input regardless of snap.context.
+        """
+        if self.tab == TAB_QUEST_PREP:
+            return self.quest_prep
+        ctx = self._context(snap)
+        return self.layouts.get(ctx)
 
     def _handle_key(self, key, snap, layout):
         if key == pygame.K_F1:
@@ -127,6 +184,13 @@ class HUDApp:
         if self.show_help and key == pygame.K_ESCAPE:
             self.show_help = False
             return
+        # TAB always toggles the tab — pin the choice so auto-switch
+        # leaves it alone until the player changes context.
+        if key == pygame.K_TAB:
+            self.tab = (TAB_QUEST_PREP if self.tab == TAB_LIVE
+                        else TAB_LIVE)
+            self._tab_user_pinned = True
+            return
         # give the active layout first refusal (it may consume ESC to close
         # an overlay); only quit on ESC if nothing else wanted it
         if layout is not None and layout.handle_key(key, snap):
@@ -137,15 +201,20 @@ class HUDApp:
     # --- render ------------------------------------------------------------
 
     def _render(self, snap):
-        ctx = self._context(snap)
-        layout = self.layouts.get(ctx)
-        show_layout = layout is not None and (
-            self.forced is not None or (snap.connected and ctx in GAMEPLAY))
-        if show_layout:
-            layout.render(self.canvas, snap)
+        if self.tab == TAB_QUEST_PREP:
+            self.quest_prep.render(self.canvas, snap)
+            self._status_pill(snap, self._context(snap))
         else:
-            panels.draw_status_screen(self.canvas, snap)
-        self._status_pill(snap, ctx)
+            ctx = self._context(snap)
+            layout = self.layouts.get(ctx)
+            show_layout = layout is not None and (
+                self.forced is not None or
+                (snap.connected and ctx in GAMEPLAY))
+            if show_layout:
+                layout.render(self.canvas, snap)
+            else:
+                panels.draw_status_screen(self.canvas, snap)
+            self._status_pill(snap, ctx)
         if self.show_help:
             self._draw_help()
         self._present()
@@ -154,6 +223,12 @@ class HUDApp:
         dot = C.OK if snap.connected else C.ERR
         pygame.draw.circle(self.canvas, dot, (CANVAS_W // 2 - 142, 9), 5)
         parts = [ctx.value.upper()]
+        # Tab indicator — visible regardless of which tab is active
+        # so the user always knows what TAB does next.
+        if self.tab == TAB_QUEST_PREP:
+            parts.append("[PREP]")
+        else:
+            parts.append("[LIVE]")
         if self.forced is not None:
             parts.append("[FORCED]")
         parts.append(f"{self.clock.get_fps():.0f}fps")
