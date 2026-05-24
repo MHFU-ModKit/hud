@@ -35,6 +35,8 @@ _HELP = [
     ("", ""),
     ("B", "toggle bag panel (quest)"),
     ("] / [", "select next / previous monster (quest)"),
+    ("+ / -", "live edit selected monster size (±0.05)"),
+    ("PgUp / PgDn", "live edit selected monster type byte (±1)"),
     ("ENTER", "open / close monster detail page"),
     ("M", "cycle map image (quest)"),
     ("", ""),

@@ -1,10 +1,12 @@
-"""Standalone, read-only PPSSPP debugger client.
+"""Standalone PPSSPP debugger client.
 
 A self-contained copy of the WebSocket debugger protocol — the HUD does not
-import the project's `mhfu_bot` toolkit. Deliberately READ-ONLY: it exposes
-memory reads only, never input injection, breakpoints, or memory writes.
-Debugger memory reads do not pause emulation, so polling cannot influence
-gameplay.
+import the project's `mhfu_bot` toolkit. Reads never pause emulation, so
+polling cannot influence gameplay. Writes are deliberately gated behind
+`write_memory_*` methods that the HUD only calls from the QUEST-PREP
+editor — every other code path stays read-only. The QUEST tab can also
+issue per-entity writes (size scalar, type byte) once the user explicitly
+edits a value.
 """
 
 import base64
@@ -220,3 +222,23 @@ class PPSSPPClient:
     def read_f32(self, address: int) -> float:
         data = self.read_memory(address, 4)
         return struct.unpack("<f", data)[0] if len(data) == 4 else 0.0
+
+    # --- write surface (used only by explicit editor commands) ------------
+
+    def write_memory(self, address: int, data: bytes) -> None:
+        """Write raw bytes. Used by QUEST tab's per-entity scale/type
+        edit + QUEST-PREP block edits. The PPSSPP API uses base64."""
+        b64 = base64.b64encode(data).decode("ascii")
+        self._request("memory.write", address=address, base64=b64)
+
+    def write_u8(self, address: int, value: int) -> None:
+        self.write_memory(address, bytes([value & 0xFF]))
+
+    def write_u16(self, address: int, value: int) -> None:
+        self.write_memory(address, struct.pack("<H", value & 0xFFFF))
+
+    def write_u32(self, address: int, value: int) -> None:
+        self.write_memory(address, struct.pack("<I", value & 0xFFFFFFFF))
+
+    def write_f32(self, address: int, value: float) -> None:
+        self.write_memory(address, struct.pack("<f", value))

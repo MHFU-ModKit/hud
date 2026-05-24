@@ -85,8 +85,89 @@ class QuestLayout(Layout):
             i = self._maps.index(self.map_slug) if self.map_slug in self._maps else -1
             self.map_slug = self._maps[(i + 1) % len(self._maps)]
             return True
+        # Calibration shortcuts get priority — many of them (= / - / , / .)
+        # would otherwise be eaten by the monster-edit keys below.
         if self.calib_mode:
             return self._calib_key(key)
+        # --- live monster editor — Section 15.7 stopgap --------------
+        # Spawn-time editing (modify spawn before quest) is gated on
+        # the pre-quest spawn-list discovery; that hit a hard limit.
+        # Meanwhile the per-entity scale + type byte ARE writable on a
+        # live monster (verified via PPSSPP write_memory). These keys
+        # apply to the SELECTED monster (cycle with [ ]).
+        if n and 0 <= self.selected < n and self.reader is not None \
+                and self.reader._client is not None:
+            m = snapshot.monsters[self.selected]
+            if self._edit_key(key, m):
+                return True
+        return False
+
+    # Per-entity write helpers — only invoked from explicit key edits
+    # in the QUEST tab. Bumps scale +0x024 (f32) and type byte +0x1E8
+    # (u8) on the selected monster. Each press is one write; no
+    # accidental drift.
+    SIZE_STEP_FINE = 0.05
+    SIZE_STEP_COARSE = 0.2
+    SIZE_MIN = 0.1
+    SIZE_MAX = 5.0
+
+    def _edit_key(self, key, m) -> bool:
+        from .. import addresses as A
+        c = self.reader._client
+        if key == pygame.K_EQUALS or key == pygame.K_PLUS \
+                or key == pygame.K_KP_PLUS:
+            new = (m.size_scale or 1.0) + self.SIZE_STEP_FINE
+            new = min(self.SIZE_MAX, new)
+            try:
+                c.write_f32(m.ptr + A.OFF_M_SIZE_SCALE, new)
+            except Exception:
+                pass
+            return True
+        if key == pygame.K_MINUS or key == pygame.K_KP_MINUS:
+            new = max(self.SIZE_MIN,
+                      (m.size_scale or 1.0) - self.SIZE_STEP_FINE)
+            try:
+                c.write_f32(m.ptr + A.OFF_M_SIZE_SCALE, new)
+            except Exception:
+                pass
+            return True
+        # Coarse +/- with shift held — pygame.key.get_mods checks
+        # the modifier state at the moment of the press.
+        if key == pygame.K_GREATER or key == pygame.K_PERIOD:
+            new = min(self.SIZE_MAX,
+                      (m.size_scale or 1.0) + self.SIZE_STEP_COARSE)
+            try:
+                c.write_f32(m.ptr + A.OFF_M_SIZE_SCALE, new)
+            except Exception:
+                pass
+            return True
+        if key == pygame.K_LESS or key == pygame.K_COMMA:
+            new = max(self.SIZE_MIN,
+                      (m.size_scale or 1.0) - self.SIZE_STEP_COARSE)
+            try:
+                c.write_f32(m.ptr + A.OFF_M_SIZE_SCALE, new)
+            except Exception:
+                pass
+            return True
+        # Type-byte cycle: PgDown / PgUp ± 1 to the +0x1E8 byte. The
+        # byte controls *what species* the engine renders/animates,
+        # though changing it on a live entity can leave a stale
+        # vtable + animation set — useful for visual experiments, not
+        # for stable swaps.
+        if key == pygame.K_PAGEUP:
+            new = (m.type_byte + 1) & 0xFF
+            try:
+                c.write_u8(m.ptr + A.OFF_M_TYPE, new)
+            except Exception:
+                pass
+            return True
+        if key == pygame.K_PAGEDOWN:
+            new = (m.type_byte - 1) & 0xFF
+            try:
+                c.write_u8(m.ptr + A.OFF_M_TYPE, new)
+            except Exception:
+                pass
+            return True
         return False
 
     def _calib_key(self, key) -> bool:
@@ -558,8 +639,9 @@ class QuestLayout(Layout):
         ]
         W.kv_rows(surface, (x, self._detail_rect.y + 148), rows, size=12, line_h=18,
                   key_w=92)
-        W.text(surface, "ENTER: full detail page", (self._detail_rect.centerx,
-               self._detail_rect.bottom - 22), size=10, color=C.TEXT_FAINT,
+        W.text(surface, "+/- size  ·  PgUp/Dn type  ·  ENTER detail",
+               (self._detail_rect.centerx,
+                self._detail_rect.bottom - 22), size=10, color=C.TEXT_FAINT,
                align="center")
 
     # --- overlays ----------------------------------------------------------
