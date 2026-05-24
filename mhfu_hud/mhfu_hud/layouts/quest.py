@@ -113,13 +113,14 @@ class QuestLayout(Layout):
 
     def _edit_key(self, key, m) -> bool:
         from .. import addresses as A
+        from ..edits import _write_size
         c = self.reader._client
         if key == pygame.K_EQUALS or key == pygame.K_PLUS \
                 or key == pygame.K_KP_PLUS:
             new = (m.size_scale or 1.0) + self.SIZE_STEP_FINE
             new = min(self.SIZE_MAX, new)
             try:
-                c.write_f32(m.ptr + A.OFF_M_SIZE_SCALE, new)
+                _write_size(c, m.ptr, new, A)
             except Exception:
                 pass
             return True
@@ -127,7 +128,7 @@ class QuestLayout(Layout):
             new = max(self.SIZE_MIN,
                       (m.size_scale or 1.0) - self.SIZE_STEP_FINE)
             try:
-                c.write_f32(m.ptr + A.OFF_M_SIZE_SCALE, new)
+                _write_size(c, m.ptr, new, A)
             except Exception:
                 pass
             return True
@@ -137,7 +138,7 @@ class QuestLayout(Layout):
             new = min(self.SIZE_MAX,
                       (m.size_scale or 1.0) + self.SIZE_STEP_COARSE)
             try:
-                c.write_f32(m.ptr + A.OFF_M_SIZE_SCALE, new)
+                _write_size(c, m.ptr, new, A)
             except Exception:
                 pass
             return True
@@ -145,7 +146,7 @@ class QuestLayout(Layout):
             new = max(self.SIZE_MIN,
                       (m.size_scale or 1.0) - self.SIZE_STEP_COARSE)
             try:
-                c.write_f32(m.ptr + A.OFF_M_SIZE_SCALE, new)
+                _write_size(c, m.ptr, new, A)
             except Exception:
                 pass
             return True

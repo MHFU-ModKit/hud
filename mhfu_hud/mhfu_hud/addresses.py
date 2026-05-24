@@ -80,16 +80,24 @@ OFF_M_AI_324    = 0x324         # u16
 OFF_M_AI_32C    = 0x32C         # u16
 OFF_M_AI_BEHAV  = 0x334         # u16
 OFF_M_DAMAGE_Q  = 0x3B8         # u32
-# Per-entity scale multiplier (f32). Pinned 2026-05-24 (Section 14) by
-# diffing 3 popo loads (edge_to_s1, edge_to_s7) against 3 anteka loads
-# (edge_to_s6): popos read {0.8, 1.1} per entity (variable), antekas all
-# read 1.3 (uniform), Tigrex reads 0.9 (tigrex_s6 dump). Five offsets
-# mirror the same value — 0x024, 0x220, 0x224, 0x228, 0x270. 0x024 is
-# the canonical source (earliest in struct, set at spawn from quest
-# data); 0x220..0x228 looks like the per-axis render-scale vec3
-# (x=y=z=scale); 0x270 is likely a cached bounding-sphere radius. HUD
-# reads 0x024 as the displayed "Size" value.
-OFF_M_SIZE_SCALE = 0x024        # f32 per-entity scale multiplier
+# Per-entity scale multiplier (f32). Pinned 2026-05-24 (Section 14)
+# at five mirroring offsets: +0x024 + +0x220 + +0x224 + +0x228 + +0x270.
+# Section 15.16 (2026-05-24) found a critical asymmetry between them:
+#   +0x024  REVERTS within 50 ms when written live. The engine re-derives
+#           this cell every frame from another source. Writing it gives
+#           only a brief visual flicker.
+#   +0x220, +0x224, +0x228 (per-axis render scale vec3) — STICK on write.
+#   +0x270 (cached radius) — STICKS on write.
+# Practical layout: READ from +0x220 (any of the sticky cells works;
+# they share the value at spawn), WRITE the four sticky cells to
+# actually change the visible size. OFF_M_SIZE_SCALE retained for
+# back-compat with code that just wants ANY representative read.
+OFF_M_SIZE_SCALE = 0x220        # f32 — read here (stable, render-active)
+OFF_M_SIZE_SOURCE_VOLATILE = 0x024  # do NOT write — engine re-derives
+OFF_M_SIZE_SCALE_X = 0x220      # write all four to commit a size change
+OFF_M_SIZE_SCALE_Y = 0x224
+OFF_M_SIZE_SCALE_Z = 0x228
+OFF_M_SIZE_CACHED_RADIUS = 0x270
 MONSTER_STRUCT_SPAN = 0x3C0     # bytes to slurp per monster
 # Small-monster vtables. Each *species* in the small class has its own
 # vtable — Popo and Anteka share the registry / offset layout but

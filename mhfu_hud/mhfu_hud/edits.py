@@ -23,6 +23,20 @@ from dataclasses import dataclass, field
 from typing import Optional, Set
 
 
+def _write_size(client, ptr: int, value: float, addresses) -> None:
+    """Commit a size change to all 4 sticky cells.
+
+    Section 15.16: writing only +0x024 reverts within 50 ms (engine
+    re-derives it). The visible render scale lives in the per-axis
+    vec3 at +0x220/+0x224/+0x228 plus a cached radius at +0x270 —
+    these stick and the visible model size reflects them next frame.
+    """
+    client.write_f32(ptr + addresses.OFF_M_SIZE_SCALE_X, value)
+    client.write_f32(ptr + addresses.OFF_M_SIZE_SCALE_Y, value)
+    client.write_f32(ptr + addresses.OFF_M_SIZE_SCALE_Z, value)
+    client.write_f32(ptr + addresses.OFF_M_SIZE_CACHED_RADIUS, value)
+
+
 @dataclass
 class StagedEdit:
     """One pending edit. Each instance owns its own `applied_to` set so
@@ -84,21 +98,21 @@ class EditBank:
                 target_addr = None
                 value_to_write = None
                 if e.kind == "size_species" and m.type_byte == e.selector_value:
-                    target_addr = m.ptr + addresses.OFF_M_SIZE_SCALE
+                    # Section 15.16: +0x024 is volatile (engine re-derives
+                    # every frame). The four render-scale + radius cells
+                    # at +0x220/+0x224/+0x228/+0x270 are the sticky ones.
+                    # Write all four to commit a visible size change.
                     try:
-                        client.write_f32(target_addr, float(e.new_value))
-                        # Mirror cells +0x220..+0x228 are derived per-frame
-                        # by the engine from +0x024 (Section 14 finding) so
-                        # we only need to write the source. The +0x270
-                        # cached radius gets recomputed too.
+                        _write_size(client, m.ptr, float(e.new_value),
+                                    addresses)
                         writes += 1
                         e.applied_to.add(m.ptr)
                     except Exception:
                         pass
                 elif e.kind == "size_slot" and m.slot == e.selector_value:
                     try:
-                        client.write_f32(m.ptr + addresses.OFF_M_SIZE_SCALE,
-                                         float(e.new_value))
+                        _write_size(client, m.ptr, float(e.new_value),
+                                    addresses)
                         writes += 1
                         e.applied_to.add(m.ptr)
                     except Exception:
