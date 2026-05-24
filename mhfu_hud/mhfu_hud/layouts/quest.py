@@ -41,6 +41,11 @@ class QuestLayout(Layout):
         self.selected = 0
         self.detail_open = False
         self.calib_mode = False
+        # Bag visibility: default ON; press B to toggle. When hidden,
+        # DETAIL expands into the bag rect so the full monster info is
+        # visible (previously the bag was clipping detail rows past
+        # "Entity ID"). User-driven from Section 15 layout fix.
+        self.bag_visible = True
         self.map_slug = "snowy_mountains"
         self._maps = self.assets.map_slugs() or ["snowy_mountains"]
         if self.map_slug not in self._maps:
@@ -54,7 +59,10 @@ class QuestLayout(Layout):
 
     def handle_key(self, key, snapshot) -> bool:
         n = len(snapshot.monsters)
-        if key in (pygame.K_TAB, pygame.K_RIGHTBRACKET):
+        # TAB is reserved by the app for LIVE/QUEST-PREP tab switching
+        # (Section 15). Monster cycle now lives on [ ] only — drop the
+        # K_TAB shortcut from this layout so HUDApp can consume it.
+        if key == pygame.K_RIGHTBRACKET:
             if n:
                 self.selected = (self.selected + 1) % n
             return True
@@ -64,6 +72,11 @@ class QuestLayout(Layout):
             return True
         if key == pygame.K_RETURN:
             self.detail_open = not self.detail_open
+            return True
+        if key == pygame.K_b:
+            # Toggle bag visibility — when hidden, the DETAIL panel
+            # expands into the freed rect so all monster fields show.
+            self.bag_visible = not self.bag_visible
             return True
         if key == pygame.K_c:
             self.calib_mode = not self.calib_mode
@@ -147,8 +160,20 @@ class QuestLayout(Layout):
         self._map_panel(surface, snapshot)
         self._roster_panel(surface, snapshot)
         self._sharpness_panel(surface)
+        # Pick the detail rect on the fly: when bag is hidden, detail
+        # eats the bag's rect too. _detail_panel + _bag_panel read this
+        # via self._detail_rect / self._bag_rect.
+        if self.bag_visible:
+            self._detail_rect = R_DETAIL
+            self._bag_rect = R_BAG
+        else:
+            self._detail_rect = pygame.Rect(
+                R_DETAIL.x, R_DETAIL.y,
+                R_DETAIL.w, R_BAG.bottom - R_DETAIL.y)
+            self._bag_rect = None
         self._detail_panel(surface, snapshot)
-        self._bag_panel(surface, snapshot)
+        if self.bag_visible:
+            self._bag_panel(surface, snapshot)
         panels.draw_raw_strip(surface, R_RAW, snapshot)
 
         if self.detail_open and monsters:
@@ -472,30 +497,31 @@ class QuestLayout(Layout):
                    size=11, color=C.SELECT, bold=True, align="center")
 
     def _detail_panel(self, surface, snapshot):
-        W.panel(surface, R_DETAIL, title="DETAIL")
+        W.panel(surface, self._detail_rect, title="DETAIL")
         monsters = snapshot.monsters
         if not monsters:
-            W.text(surface, "select a monster", (R_DETAIL.x + 12,
-                   R_DETAIL.y + 34), size=12, color=C.TEXT_FAINT)
-            W.text(surface, "TAB / [ ] to cycle", (R_DETAIL.x + 12,
-                   R_DETAIL.y + 52), size=11, color=C.TEXT_FAINT)
+            W.text(surface, "select a monster", (self._detail_rect.x + 12,
+                   self._detail_rect.y + 34), size=12, color=C.TEXT_FAINT)
+            W.text(surface, "[ ] to cycle  ·  B toggles bag",
+                   (self._detail_rect.x + 12,
+                   self._detail_rect.y + 52), size=11, color=C.TEXT_FAINT)
             return
         m = monsters[self.selected]
-        x = R_DETAIL.x + 12
+        x = self._detail_rect.x + 12
         icon = self.assets.monster_icon(m.icon_slug)
         if icon:
             surface.blit(self.assets.scaled(icon, (64, 64)),
-                         (R_DETAIL.centerx - 32, R_DETAIL.y + 28))
+                         (self._detail_rect.centerx - 32, self._detail_rect.y + 28))
         else:
-            W.placeholder_box(surface, (R_DETAIL.centerx - 32, R_DETAIL.y + 28,
+            W.placeholder_box(surface, (self._detail_rect.centerx - 32, self._detail_rect.y + 28,
                                         64, 64), "no icon")
-        W.text(surface, m.name, (R_DETAIL.centerx, R_DETAIL.y + 96), size=16,
+        W.text(surface, m.name, (self._detail_rect.centerx, self._detail_rect.y + 96), size=16,
                color=C.SELECT, bold=True, align="center")
 
         hp_max = max(1, m.hp_max)
-        W.bar(surface, (x, R_DETAIL.y + 122, R_DETAIL.w - 24, 14),
+        W.bar(surface, (x, self._detail_rect.y + 122, self._detail_rect.w - 24, 14),
               m.hp / hp_max, C.MONSTER)
-        W.text(surface, f"HP {m.hp}", (R_DETAIL.centerx, R_DETAIL.y + 124),
+        W.text(surface, f"HP {m.hp}", (self._detail_rect.centerx, self._detail_rect.y + 124),
                size=11, color=C.TEXT, bold=True, align="center")
 
         dist = self._distance(m, snapshot.player)
@@ -514,10 +540,10 @@ class QuestLayout(Layout):
             ("World Z", f"{m.pos.z:.0f}"),
             ("Dist", "—" if dist is None else f"{dist:.0f}"),
         ]
-        W.kv_rows(surface, (x, R_DETAIL.y + 148), rows, size=12, line_h=18,
+        W.kv_rows(surface, (x, self._detail_rect.y + 148), rows, size=12, line_h=18,
                   key_w=92)
-        W.text(surface, "ENTER: full detail page", (R_DETAIL.centerx,
-               R_DETAIL.bottom - 22), size=10, color=C.TEXT_FAINT,
+        W.text(surface, "ENTER: full detail page", (self._detail_rect.centerx,
+               self._detail_rect.bottom - 22), size=10, color=C.TEXT_FAINT,
                align="center")
 
     # --- overlays ----------------------------------------------------------
