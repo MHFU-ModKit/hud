@@ -6,10 +6,18 @@ from docs/agent_memory_map.md; unknown bytes fall back to a generic label
 and no icon. Extend TYPE_NAMES as more type bytes are pinned.
 """
 
-# Confirmed in reverse-engineering work.
+# Confirmed in reverse-engineering work. The type byte at +0x1E8 varies
+# by AI state (Popo reads 0x46 OR 0x48), so multiple bytes can map to the
+# same species. Add new pairings here as they are observed.
 TYPE_NAMES = {
+    0x05: "Bullfango",   # confirmed 2026-05-24
+    0x13: "Vespoid",     # confirmed 2026-05-24
+    0x23: "Giaprey",     # confirmed 2026-05-24, snowy mountains
+    0x3D: "Blango",      # confirmed 2026-05-24, snowy mountains
+    0x45: "Anteka",      # confirmed 2026-05-24, snowy mountains
     0x46: "Popo",
     0x48: "Popo",
+    0x4B: "Tigrex",      # confirmed 2026-05-24
 }
 
 # Display name -> preferred icon-asset slug. The asset fetcher writes a
@@ -17,6 +25,12 @@ TYPE_NAMES = {
 # from a plain slugify (most do not, so the table stays small).
 NAME_TO_SLUG = {
     "Popo": "popo",
+    "Anteka": "anteka",
+    "Giaprey": "giaprey",
+    "Vespoid": "vespoid",
+    "Bullfango": "bullfango",
+    "Blango": "blango",
+    "Tigrex": "tigrex",
 }
 
 

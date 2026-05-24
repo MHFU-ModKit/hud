@@ -57,7 +57,8 @@ class HUDApp:
         self.calib = Calibration()
         self.layouts = {
             Context.VILLAGE: VillageLayout(self.assets, self.calib),
-            Context.QUEST: QuestLayout(self.assets, self.calib),
+            Context.QUEST: QuestLayout(self.assets, self.calib,
+                                       reader=self.reader),
         }
         self.forced = None          # Context or None (= auto)
         self.show_help = False
