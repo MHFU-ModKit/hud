@@ -127,7 +127,31 @@ OFF_M_SIZE_SCALE_X = 0x220      # write all four to commit a size change
 OFF_M_SIZE_SCALE_Y = 0x224
 OFF_M_SIZE_SCALE_Z = 0x228
 OFF_M_SIZE_CACHED_RADIUS = 0x270
-MONSTER_STRUCT_SPAN = 0x3C0     # bytes to slurp per monster
+# AI cells pinned in Sections 18-19 (see CLAUDE.md). All offsets are from
+# the entity ptr. Reads always cover up to 0x700 so the AI panel sees every
+# documented field in a single region slurp (one PPSSPP round-trip).
+OFF_M_HEADING       = 0x010     # vec3 unit-ish heading (rotates toward target)
+OFF_M_TRANSFORM_TX  = 0x040     # transform translation row (x,y,z,1)
+OFF_M_FRAME_COUNTER = 0x092     # u8  per-entity frame counter
+OFF_M_ANIM_PTR      = 0x0B8     # u32 currently-playing anim
+OFF_M_BUSY_BITS     = 0x0BC     # u32 flag word — bit 0 = event-busy
+OFF_M_ACTION_COUNT  = 0x1A2     # u16 loop bound (engine-only)
+OFF_M_SPECIES_TBL   = 0x1AC     # u32 species data ptr (set per area)
+OFF_M_PURSUE_TARGET = 0x1C8     # u32 — non-NULL = PURSUE, NULL = FLEE
+OFF_M_HERD_RALLY    = 0x1214    # vec3 herd rally world position
+OFF_M_HERD_MEMBERS  = 0x1220    # u32[20] herd-member entity ptrs
+OFF_M_MODE_BYTE     = 0x29C     # u8 output mode (0..3) — NOT a trigger
+OFF_M_STIMULUS_TAG  = 0x322     # u8 written by damage handler
+OFF_M_AI_326        = 0x326     # u16 paired "next seed"
+OFF_M_FLAG_410      = 0x410     # u32 condition flag word (bit 0x8 = state 1001)
+OFF_M_DAMAGE_FLAG   = 0x414     # u32 flag word written by damage handler
+                                # (Section 19 cascade — separate from +0x410)
+OFF_M_TIMER_624     = 0x624     # u16 countdown timer (scaled by 0x09AACCF8)
+OFF_M_TIMER_626     = 0x626     # u16 countdown timer
+OFF_M_STRESS_62E    = 0x62E     # u16 stress counter clamped [75, 450]
+OFF_M_ACTION_LIST   = 0x640     # u32 per-entity action list ptr
+OFF_M_FLEE_FLAG     = 0x6D8     # u8 OUTPUT only — game-written
+MONSTER_STRUCT_SPAN = 0x700     # bytes to slurp per monster (covers AI block)
 # Small-monster vtables. Each *species* in the small class has its own
 # vtable — Popo and Anteka share the registry / offset layout but
 # different vtable. Add new ones as they are observed live (Velociprey,
@@ -149,6 +173,44 @@ MONSTER_VTABLE_SMALL = 0x089BC560
 MONSTER_VTABLE_BIG = {
     0x089BB69C: "Tigrex",       # pinned 2026-05-24 — tigrex_s6 save
 }
+
+
+# --- AI engine globals (Section 19) ---------------------------------------
+# Per-species data table — entries are 0x1D0 bytes, indexed by entity+0x1E8.
+# Verified entries: Anteka 0x45 -> 0x09BC04D0, Popo 0x46 -> 0x09BC06A0,
+# Tigrex 0x4B -> 0x09BC0FB0. The type-0 entry is a default / dead-area
+# template; real per-species CODE override happens via vtable[2]/vt[6].
+SPECIES_TABLE_BASE = 0x09BB87C0
+SPECIES_TABLE_STRIDE = 0x1D0
+
+# Species data block offsets (within one 0x1D0-byte entry, Section 19e.1).
+# All five "data ptrs" point into per-species data blocks, NOT into code
+# (Section 19d.1 verified by disasm).
+OFF_SD_COOLDOWN      = 0x00    # u32 cooldown-timer table ptr
+OFF_SD_WEIGHTS       = 0x04    # u32 probability-weights ptr
+OFF_SD_HITZONES      = 0x08    # u32 hitzone damage multipliers ptr
+OFF_SD_ACTIONS       = 0x0C    # u32 action descriptor list ptr
+OFF_SD_RANGE_PARAMS  = 0x20    # 0x30 bytes of range-param floats (12 floats)
+OFF_SD_SCALARS       = 0x60    # 0x10 bytes — 4 scalar floats
+OFF_SD_PATTERNS      = 0x70    # u32 attack-pattern / hitbox-volume ptr
+OFF_SD_HITBOX        = 0x80    # 0x50 bytes hitbox data
+SPECIES_DATA_SPAN    = 0xD0    # bytes we actually read per entry (rounded)
+
+# Engine APIs and dispatchers — wraps + patches operate on these.
+ADDR_RAISE_EVENT      = 0x09A677F8   # raise_event(entity, 0, event_id, 0)
+ADDR_STATE_LADDER     = 0x09A679D8   # IF/ELSE state-literal writer
+ADDR_PROB_LOOKUP_VT8  = 0x08865254   # vtable[8] shared probability lookup
+ADDR_AI_DISPATCHER    = 0x09AC5400   # main per-tick dispatcher
+ADDR_AI_DISPATCHER_3A = 0x09AC5200   # alt dispatcher for type 0x3A
+ADDR_TYPE_3A_ACTLIST  = 0x09BD38F0   # runtime-mutable action-list pool (type 0x3A)
+ADDR_TIMER_SCALE      = 0x09AACCF8   # entity-stat scaling helper
+
+# Event ID set observed in popo_ovl_A (Section 19b/c).
+EVENT_IDS_OBSERVED = (0x2, 0x3, 0x4, 0x6, 0x8, 0xA, 0xC)
+
+# Big-monster type bytes (Section 14 + 19g.3 list). Type 0x3A is the boss
+# class with the alt dispatcher + runtime-mutable +0x640 action list.
+TYPE_BYTES_BIG = (0x3A, 0x4B)
 
 
 def monster_category(vtable: int) -> str:

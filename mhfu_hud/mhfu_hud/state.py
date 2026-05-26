@@ -32,6 +32,53 @@ class Context(Enum):
 
 
 @dataclass
+class SpeciesData:
+    """One per-species entry from SPECIES_TABLE_BASE (0x09BB87C0, stride 0x1D0).
+    Read on-demand from the AI_MOD layout, NOT the poll loop — entries don't
+    move during a quest, so a one-shot read per type byte is enough."""
+    type_byte: int = 0
+    entry_addr: int = 0
+    cooldown_ptr: int = 0
+    weights_ptr: int = 0
+    hitzones_ptr: int = 0
+    actions_ptr: int = 0
+    patterns_ptr: int = 0
+    range_params: list = field(default_factory=list)    # 12 floats
+    scalars: list = field(default_factory=list)         # 4 floats
+    raw: bytes = b""                                    # full 0xD0-byte slice
+
+
+@dataclass
+class MonsterAI:
+    """Extended AI block fields populated from the monster region read.
+    All fields are read-only diagnostic snapshots; writes go through
+    the PinEngine, not this dataclass. Field names mirror the offsets
+    documented in CLAUDE.md / docs/POPO_AI_STRUCTURE.md."""
+    heading: Vec3 = field(default_factory=Vec3)         # +0x010 vec3
+    frame_counter: int = 0                              # +0x092 u8
+    anim_ptr: int = 0                                   # +0x0B8 u32
+    busy_bits: int = 0                                  # +0x0BC u32
+    action_count: int = 0                               # +0x1A2 u16
+    species_tbl_ptr: int = 0                            # +0x1AC u32
+    pursue_target: int = 0                              # +0x1C8 u32 — non-NULL = pursue
+    herd_rally: Vec3 = field(default_factory=Vec3)      # +0x1214 vec3
+    herd_members: list = field(default_factory=list)    # +0x1220 u32[20]
+    mode_byte: int = 0                                  # +0x29C u8 (0..3)
+    stimulus_tag: int = 0                               # +0x322 u8
+    seed: int = 0                                       # +0x324 u16
+    seed_paired: int = 0                                # +0x326 u16
+    ai_param: int = 0                                   # +0x32C u16
+    state_byte: int = 0                                 # +0x334 u16 — {1,2,5,10}
+    flag_410: int = 0                                   # +0x410 u32
+    damage_flag: int = 0                                # +0x414 u32 — damage handler output
+    timer_624: int = 0                                  # +0x624 u16
+    timer_626: int = 0                                  # +0x626 u16
+    stress_62E: int = 0                                 # +0x62E u16 — [75, 450]
+    action_list_ptr: int = 0                            # +0x640 u32 — dynamic for type 0x3A
+    flee_flag: int = 0                                  # +0x6D8 u8 OUTPUT
+
+
+@dataclass
 class MonsterHUD:
     slot: int
     ptr: int
@@ -56,6 +103,7 @@ class MonsterHUD:
     # see addresses.OFF_M_SIZE_SCALE for the discovery notes. Renders
     # next to HP / name in the monster panels.
     size_scale: Optional[float] = None
+    ai: Optional[MonsterAI] = None  # populated when the AI block is parsed
 
 
 @dataclass(frozen=True)

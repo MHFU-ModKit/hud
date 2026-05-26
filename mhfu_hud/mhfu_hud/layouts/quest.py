@@ -35,11 +35,18 @@ PLAYER_MARKER_R = 9
 class QuestLayout(Layout):
     name = "quest"
 
+    DETAIL_SUBTABS = ("stats", "ai_diag")
+
     def __init__(self, assets, calib, reader=None):
         super().__init__(assets, calib)
         self.reader = reader        # may be None in smoke tests
         self.selected = 0
         self.detail_open = False
+        # When the detail overlay is open, TAB cycles its sub-page rather
+        # than the top-level app tabs. "stats" shows the legacy kv-rows
+        # readout; "ai_diag" shows the read-only AI panel from
+        # docs/POPO_AI_STRUCTURE.md §19f.4.
+        self.detail_subtab = "stats"
         self.calib_mode = False
         # Bag visibility: default ON; press B to toggle. When hidden,
         # DETAIL expands into the bag rect so the full monster info is
@@ -59,9 +66,14 @@ class QuestLayout(Layout):
 
     def handle_key(self, key, snapshot) -> bool:
         n = len(snapshot.monsters)
-        # TAB is reserved by the app for LIVE/QUEST-PREP tab switching
-        # (Section 15). Monster cycle now lives on [ ] only — drop the
-        # K_TAB shortcut from this layout so HUDApp can consume it.
+        # TAB sub-page cycling only kicks in WHILE the monster detail
+        # overlay is open. Otherwise TAB falls through to the app and
+        # cycles top-level tabs (LIVE / QUEST_PREP / AI_MOD).
+        if key == pygame.K_TAB and self.detail_open:
+            i = self.DETAIL_SUBTABS.index(self.detail_subtab)
+            self.detail_subtab = self.DETAIL_SUBTABS[
+                (i + 1) % len(self.DETAIL_SUBTABS)]
+            return True
         if key == pygame.K_RIGHTBRACKET:
             if n:
                 self.selected = (self.selected + 1) % n
@@ -689,9 +701,21 @@ class QuestLayout(Layout):
         self.dim(surface, pygame.Rect(0, 0, CANVAS_W, CANVAS_H), 170)
         box = pygame.Rect(CANVAS_W // 2 - 280, CANVAS_H // 2 - 200, 560, 400)
         W.panel(surface, box, fill=C.PANEL_HI, border=C.SELECT)
-        W.text(surface, f"{m.name}  —  MONSTER DETAIL", (box.x + 20, box.y + 14),
-               size=18, color=C.SELECT, bold=True)
+        # Sub-tab indicator + tabs label. Title font shrunk + hint moved
+        # to the panel footer so they don't collide on narrow names.
+        tab_str = "STATS" if self.detail_subtab == "stats" else "AI DIAG"
+        W.text(surface, f"{m.name}  —  {tab_str}",
+               (box.x + 20, box.y + 14), size=18, color=C.SELECT, bold=True)
+        W.text(surface, "TAB switch  ·  ENTER/ESC close",
+               (box.right - 20, box.bottom - 24), size=11, color=C.TEXT_DIM,
+               align="right")
 
+        if self.detail_subtab == "stats":
+            self._detail_subtab_stats(surface, box, m, player)
+        else:
+            self._detail_subtab_ai(surface, box, m)
+
+    def _detail_subtab_stats(self, surface, box, m, player):
         icon = self.assets.monster_icon(m.icon_slug)
         if icon:
             surface.blit(self.assets.scaled(icon, (140, 140)),
@@ -724,11 +748,73 @@ class QuestLayout(Layout):
         ]
         W.kv_rows(surface, (box.x + 190, box.y + 56), rows, size=13,
                   line_h=24, key_w=180)
-        W.text(surface, "placeholder fields appear once their offsets are "
-               "reverse-engineered", (box.x + 20, box.bottom - 44), size=11,
-               color=C.TEXT_FAINT)
-        W.text(surface, "ENTER / ESC: close", (box.right - 20, box.bottom - 24),
-               size=11, color=C.TEXT_DIM, align="right")
+        W.text(surface, "TAB to AI DIAG  ·  AI-MOD tab for live edit",
+               (box.x + 20, box.bottom - 44), size=11, color=C.TEXT_FAINT)
+
+    def _detail_subtab_ai(self, surface, box, m):
+        """Read-only AI diagnostic panel — Section 19f.4. Pulls fields from
+        the per-entity MonsterAI snapshot the reader builds every poll."""
+        ai = m.ai
+        if ai is None:
+            W.text(surface, "no AI snapshot available — reader has not yet "
+                   "parsed this entity",
+                   (box.x + 24, box.y + 60), size=12, color=C.PLACEHOLDER)
+            return
+        pursue_str = ("FLEE  (+0x1C8 == 0)" if ai.pursue_target == 0
+                      else f"PURSUE  -> 0x{ai.pursue_target:08X}")
+        flee_str = "1 (engine: fleeing)" if ai.flee_flag else "0"
+        busy_str = "BUSY" if (ai.busy_bits & 0x1) else "free"
+        mode_str = f"{ai.mode_byte}  (0..3 output mode)"
+        # Section 19e.3 — bit 0x8 of +0x410 → state 1001.
+        flag_bits = []
+        for bit in (0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80):
+            if ai.flag_410 & bit:
+                flag_bits.append(f"0x{bit:02X}")
+        flag_bits_s = ", ".join(flag_bits) if flag_bits else "—"
+
+        x0 = box.x + 24
+        x1 = box.x + 290
+        y0 = box.y + 50
+        # Left column — direction + identity
+        rows_left = [
+            ("Pos (x,y,z)", f"{m.pos.x:.0f}, {m.pos.y:.0f}, {m.pos.z:.0f}"),
+            ("Heading", f"{ai.heading.x:+.2f}, {ai.heading.y:+.2f}, "
+                        f"{ai.heading.z:+.2f}"),
+            ("Anim ptr (+0xB8)", f"0x{ai.anim_ptr:08X}"),
+            ("Busy bits (+0xBC)", f"0x{ai.busy_bits:08X}  ({busy_str})"),
+            ("Frame ctr (+0x092)", ai.frame_counter),
+            ("Action cnt (+0x1A2)", ai.action_count),
+            ("Species tbl (+0x1AC)", f"0x{ai.species_tbl_ptr:08X}"),
+            ("Pursue (+0x1C8)", pursue_str),
+            ("Action list (+0x640)", f"0x{ai.action_list_ptr:08X}"),
+            ("Flee flag (+0x6D8)", flee_str),
+            ("Herd members", len(ai.herd_members)),
+        ]
+        W.kv_rows(surface, (x0, y0), rows_left, size=12, line_h=20, key_w=140)
+        # Right column — state + ladder conditions
+        rows_right = [
+            ("Seed (+0x324)", ai.seed),
+            ("Seed pair (+0x326)", ai.seed_paired),
+            ("Stimulus (+0x322)", f"0x{ai.stimulus_tag:02X}"),
+            ("State (+0x334)", f"{ai.state_byte}  (1/2/5/10)"),
+            ("Mode (+0x29C)", mode_str),
+            ("Flag (+0x410)", f"0x{ai.flag_410:08X}"),
+            ("  bits set", flag_bits_s),
+            ("Dmg flag (+0x414)", f"0x{ai.damage_flag:08X}"),
+            ("Timer (+0x624)", f"{ai.timer_624}  ticks"),
+            ("Timer (+0x626)", f"{ai.timer_626}  ticks"),
+            ("Stress (+0x62E)", f"{ai.stress_62E}  [75..450]"),
+            ("AI param (+0x32C)", ai.ai_param),
+        ]
+        W.kv_rows(surface, (x1, y0), rows_right, size=12, line_h=20, key_w=140)
+        # Big-monster note — type 0x3A has dynamic +0x640
+        if m.type_byte == 0x3A:
+            W.text(surface,
+                   "type 0x3A  ·  alt dispatcher  ·  +0x640 is runtime-mutable",
+                   (box.x + 20, box.bottom - 60), size=11, color=C.WARN,
+                   bold=True)
+        W.text(surface, "read-only here  —  use AI-MOD tab to pin / edit",
+               (box.x + 20, box.bottom - 44), size=11, color=C.TEXT_FAINT)
 
     def _calib_hint(self, surface):
         box = pygame.Rect(CANVAS_W // 2 - 320, CANVAS_H - 116, 640, 76)

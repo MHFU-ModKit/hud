@@ -20,7 +20,8 @@ from .calibration import Calibration
 from .edits import EditBank
 from .monster_db import identify
 from .ppsspp import PPSSPPClient, PPSSPPError
-from .state import BagSlot, Context, GameSnapshot, MonsterHUD, PlayerHUD, Vec3
+from .state import (BagSlot, Context, GameSnapshot, MonsterAI, MonsterHUD,
+                    PlayerHUD, Vec3)
 
 # The snow map is currently the only one with calibrated anchors. When
 # the section tracker can't tell which map we're on (no live indicator
@@ -502,14 +503,72 @@ class MemoryReader:
             size_scale = None
         name, slug = identify(type_byte)
         category = A.monster_category(vtable)
+        # Big-monster type-byte fallback — Section 19g.3 lists 0x3A and 0x4B
+        # as boss-class type bytes. If the vtable lookup misses but the
+        # type byte is in the big-monster set, escalate the category so
+        # the editor surfaces the alt-dispatcher diagnostics.
+        if category != "big" and type_byte in A.TYPE_BYTES_BIG:
+            category = "big"
         # Tigrex was found with a "Tigrex"-named type but the same struct
         # layout as small monsters — the docs warn that 0x1E8 varies by
         # state. If category disagrees with the name, defer to category.
         if category == "big" and name.startswith("Unknown"):
             name = A.MONSTER_VTABLE_BIG.get(vtable, name)
             slug = name.lower()
+        ai = self._parse_monster_ai(mb)
         return MonsterHUD(
             slot=slot, ptr=ptr, entity_id=entity_id, type_byte=type_byte,
             pos=pos, hp=hp, ai_behavior=ai_behav, ai_324=ai_324,
             ai_32c=ai_32c, vtable=vtable, category=category,
-            name=name, icon_slug=slug, hp_max=hp, size_scale=size_scale)
+            name=name, icon_slug=slug, hp_max=hp, size_scale=size_scale,
+            ai=ai)
+
+    @staticmethod
+    def _parse_monster_ai(mb: bytes) -> MonsterAI:
+        """Slice the AI-region fields out of one monster's struct buffer.
+
+        The reader always slurps MONSTER_STRUCT_SPAN (0x700) bytes per
+        entity so every documented AI cell is in `mb` without a second
+        round-trip. Bounds-check defensively — a short read still parses
+        the leading fields.
+        """
+        n = len(mb)
+        def u8(off):  return mb[off] if off < n else 0
+        def u16(off): return struct.unpack_from("<H", mb, off)[0] if off + 2 <= n else 0
+        def u32(off): return struct.unpack_from("<I", mb, off)[0] if off + 4 <= n else 0
+        def vec(off):
+            if off + 12 > n:
+                return Vec3()
+            x, y, z = struct.unpack_from("<fff", mb, off)
+            return Vec3(x, y, z)
+        ai = MonsterAI(
+            heading=vec(A.OFF_M_HEADING),
+            frame_counter=u8(A.OFF_M_FRAME_COUNTER),
+            anim_ptr=u32(A.OFF_M_ANIM_PTR),
+            busy_bits=u32(A.OFF_M_BUSY_BITS),
+            action_count=u16(A.OFF_M_ACTION_COUNT),
+            species_tbl_ptr=u32(A.OFF_M_SPECIES_TBL),
+            pursue_target=u32(A.OFF_M_PURSUE_TARGET),
+            herd_rally=vec(A.OFF_M_HERD_RALLY),
+            mode_byte=u8(A.OFF_M_MODE_BYTE),
+            stimulus_tag=u8(A.OFF_M_STIMULUS_TAG),
+            seed=u16(A.OFF_M_AI_324),
+            seed_paired=u16(A.OFF_M_AI_326),
+            ai_param=u16(A.OFF_M_AI_32C),
+            state_byte=u16(A.OFF_M_AI_BEHAV),
+            flag_410=u32(A.OFF_M_FLAG_410),
+            damage_flag=u32(A.OFF_M_DAMAGE_FLAG),
+            timer_624=u16(A.OFF_M_TIMER_624),
+            timer_626=u16(A.OFF_M_TIMER_626),
+            stress_62E=u16(A.OFF_M_STRESS_62E),
+            action_list_ptr=u32(A.OFF_M_ACTION_LIST),
+            flee_flag=u8(A.OFF_M_FLEE_FLAG),
+        )
+        # Herd-member array — 20 u32 slots; skip zeros so the UI shows
+        # actual live members rather than a 20-row "0x00000000" wall.
+        base = A.OFF_M_HERD_MEMBERS
+        end = base + 20 * 4
+        if end <= n:
+            members = struct.unpack_from("<20I", mb, base)
+            ai.herd_members = [p for p in members if p != 0]
+        return ai

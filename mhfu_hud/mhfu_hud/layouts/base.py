@@ -26,6 +26,13 @@ class Layout:
         """Handle a left click in canvas coordinates. Return True if consumed."""
         return False
 
+    def handle_motion(self, canvas_pos, snapshot) -> bool:
+        """Handle a mouse-motion event in canvas coordinates. Layouts
+        that care about hover (e.g. tooltips) override this. Return
+        value is informational — motion is never 'consumed' the way
+        clicks are."""
+        return False
+
     def render(self, surface, snapshot):
         raise NotImplementedError
 

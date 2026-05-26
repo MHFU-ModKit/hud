@@ -8,36 +8,39 @@ proportions at any size. The window cannot shrink below the canvas size.
 import pygame
 
 from . import panels, widgets as W
+from .ai_pin import PinEngine
 from .assets import AssetLibrary
 from .calibration import Calibration
-from .layouts import QuestLayout, QuestPrepLayout, VillageLayout
+from .layouts import AIModLayout, QuestLayout, QuestPrepLayout, VillageLayout
 from .state import Context
 from .theme import C, CANVAS_W, CANVAS_H
 
 WINDOW_TITLE = "MHFU Live HUD"
 GAMEPLAY = {Context.VILLAGE, Context.QUEST}
 
-# Tab modes. The HUD shows ONE tab at a time. LIVE is the default
-# (auto-pick layout from snapshot context). QUEST_PREP is the spawn-
-# editor mode — auto-selected when the player is in the village AND
-# the prefetched quest data is present (heuristic: area_index != 0 in
-# village). TAB toggles manually; auto-switch happens once on context
-# entry but never overrides a manual choice.
+# Tab modes. The HUD shows ONE tab at a time. LIVE follows the snapshot
+# context, QUEST_PREP is the village spawn-editor, AI_MOD is the live AI
+# editor. TAB cycles forward through TABS; auto-switch toggles between
+# LIVE and QUEST_PREP on context changes but leaves AI_MOD alone (the
+# user pin-locks AI_MOD by hitting TAB to reach it).
 TAB_LIVE = "live"
 TAB_QUEST_PREP = "quest_prep"
+TAB_AI_MOD = "ai_mod"
+TABS = (TAB_LIVE, TAB_QUEST_PREP, TAB_AI_MOD)
 
 _HELP = [
     ("F1", "toggle this help"),
     ("F2 / F3 / F4", "layout: auto / force village / force quest"),
     ("F11", "toggle fullscreen"),
     ("ESC", "close overlay, or quit"),
-    ("TAB", "switch LIVE / QUEST-PREP tabs"),
+    ("TAB", "cycle tabs LIVE → QUEST-PREP → AI-MOD"),
     ("", ""),
     ("B", "toggle bag panel (quest)"),
     ("] / [", "select next / previous monster (quest)"),
     ("+ / -", "live edit selected monster size (±0.05)"),
     ("PgUp / PgDn", "live edit selected monster type byte (±1)"),
     ("ENTER", "open / close monster detail page"),
+    ("TAB", "in monster detail: STATS ↔ AI-DIAG sub-pages"),
     ("M", "cycle map image (quest)"),
     ("", ""),
     ("↑ ↓ ← →", "navigate quest-prep panels + rows"),
@@ -46,6 +49,15 @@ _HELP = [
     ("ENTER", "toggle edit on/off"),
     ("X / DEL", "remove staged edit"),
     ("M", "master enable auto-apply"),
+    ("", ""),
+    ("] / [", "AI-MOD: cycle entity"),
+    ("↑ / ↓", "AI-MOD: cycle field"),
+    ("← / →", "AI-MOD: switch column (entity / species / actions)"),
+    ("SPACE", "AI-MOD: toggle pin on selected field"),
+    ("+ / -", "AI-MOD: adjust selected value"),
+    ("R", "AI-MOD: raise state literal (writes seed pair)"),
+    ("F", "AI-MOD: force flee / pursue toggle on selected entity"),
+    ("X", "AI-MOD: clear all pins"),
     ("", ""),
     ("C", "toggle calibration mode"),
     ("+  /  -", "calib: map scale"),
@@ -81,11 +93,20 @@ class HUDApp:
         }
         self.quest_prep = QuestPrepLayout(self.assets, self.calib,
                                           reader=self.reader)
+        # PinEngine — owns the 30 Hz write-back thread used by the AI
+        # editor. Sleeps when no pins are active, so the read-only HUD
+        # path costs nothing extra.
+        self.pin_engine = PinEngine(
+            client_provider=lambda: self.reader._client)
+        self.pin_engine.start()
+        self.ai_mod = AIModLayout(self.assets, self.calib,
+                                  reader=self.reader,
+                                  pin_engine=self.pin_engine)
         self.forced = None          # Context or None (= auto)
-        # Tab state — TAB_LIVE = follow context (village / quest /
-        # status screen). TAB_QUEST_PREP = show the spawn-editor.
-        # `_tab_user_pinned` tracks whether the current tab was set by
-        # the user (TAB key) so auto-switch can stay out of the way.
+        # Tab state — LIVE follows context, QUEST_PREP is the spawn
+        # editor, AI_MOD is the live AI editor. `_tab_user_pinned` is
+        # set whenever the user presses TAB so auto-switch leaves their
+        # choice alone until the next context change.
         self.tab = TAB_LIVE
         self._tab_user_pinned = False
         self._last_quest_prep_eligible = False
@@ -111,12 +132,17 @@ class HUDApp:
     # --- loop --------------------------------------------------------------
 
     def run(self):
-        while self.running:
-            snap = self.reader.snapshot
-            self._handle_events(snap)
-            self._render(snap)
-            self.clock.tick(60)
-        pygame.quit()
+        try:
+            while self.running:
+                snap = self.reader.snapshot
+                self._handle_events(snap)
+                self._render(snap)
+                self.clock.tick(60)
+        finally:
+            # Always stop the pin engine on app exit so the daemon thread
+            # doesn't keep hammering writes against a torn-down reader.
+            self.pin_engine.stop()
+            pygame.quit()
 
     def _context(self, snap):
         return self.forced if self.forced is not None else snap.context
@@ -133,6 +159,9 @@ class HUDApp:
             elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                 if layout is not None:
                     layout.handle_click(self._to_canvas(ev.pos), snap)
+            elif ev.type == pygame.MOUSEMOTION:
+                if layout is not None:
+                    layout.handle_motion(self._to_canvas(ev.pos), snap)
             elif ev.type == pygame.KEYDOWN:
                 self._handle_key(ev.key, snap, layout)
 
@@ -164,9 +193,11 @@ class HUDApp:
     def _active_layout(self, snap):
         """Layout currently driving keys + click hits.
 
-        QUEST_PREP overlays the context-driven layouts; when active it
-        owns input regardless of snap.context.
+        Top-level tab decides: AI_MOD and QUEST_PREP both overlay the
+        context-driven layouts and own input fully while active.
         """
+        if self.tab == TAB_AI_MOD:
+            return self.ai_mod
         if self.tab == TAB_QUEST_PREP:
             return self.quest_prep
         ctx = self._context(snap)
@@ -191,16 +222,15 @@ class HUDApp:
         if self.show_help and key == pygame.K_ESCAPE:
             self.show_help = False
             return
-        # TAB always toggles the tab — pin the choice so auto-switch
-        # leaves it alone until the player changes context.
-        if key == pygame.K_TAB:
-            self.tab = (TAB_QUEST_PREP if self.tab == TAB_LIVE
-                        else TAB_LIVE)
-            self._tab_user_pinned = True
-            return
-        # give the active layout first refusal (it may consume ESC to close
-        # an overlay); only quit on ESC if nothing else wanted it
+        # Give the layout first chance at TAB — the quest detail page
+        # consumes TAB to cycle its STATS / AI-DIAG sub-pages. If the
+        # layout doesn't take it, fall through to the global tab cycle.
         if layout is not None and layout.handle_key(key, snap):
+            return
+        if key == pygame.K_TAB:
+            i = TABS.index(self.tab) if self.tab in TABS else 0
+            self.tab = TABS[(i + 1) % len(TABS)]
+            self._tab_user_pinned = True
             return
         if key == pygame.K_ESCAPE:
             self.running = False
@@ -208,7 +238,10 @@ class HUDApp:
     # --- render ------------------------------------------------------------
 
     def _render(self, snap):
-        if self.tab == TAB_QUEST_PREP:
+        if self.tab == TAB_AI_MOD:
+            self.ai_mod.render(self.canvas, snap)
+            self._status_pill(snap, self._context(snap))
+        elif self.tab == TAB_QUEST_PREP:
             self.quest_prep.render(self.canvas, snap)
             self._status_pill(snap, self._context(snap))
         else:
@@ -232,7 +265,10 @@ class HUDApp:
         parts = [ctx.value.upper()]
         # Tab indicator — visible regardless of which tab is active
         # so the user always knows what TAB does next.
-        if self.tab == TAB_QUEST_PREP:
+        if self.tab == TAB_AI_MOD:
+            n_pins = self.pin_engine.count()
+            parts.append(f"[AI-MOD{f' {n_pins}p' if n_pins else ''}]")
+        elif self.tab == TAB_QUEST_PREP:
             parts.append("[PREP]")
         else:
             parts.append("[LIVE]")
