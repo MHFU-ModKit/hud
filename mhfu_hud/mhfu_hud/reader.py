@@ -20,8 +20,11 @@ from .calibration import Calibration
 from .edits import EditBank
 from .monster_db import identify
 from .ppsspp import PPSSPPClient, PPSSPPError
-from .state import (BagSlot, Context, GameSnapshot, MonsterAI, MonsterHUD,
-                    PlayerHUD, Vec3)
+from .state import (AIDecision, BagSlot, Context, GameSnapshot, MonsterAI,
+                    MonsterHUD, PlayerHUD, Vec3)
+
+# How many recent AI picks to remember per monster (newest-last).
+AI_HISTORY_DEPTH = 16
 
 # The snow map is currently the only one with calibrated anchors. When
 # the section tracker can't tell which map we're on (no live indicator
@@ -92,6 +95,16 @@ class MemoryReader:
         # the quest area.
         self.edit_bank = EditBank()
         self._was_in_quest_with_entities = False
+        # Per-entity AI-decision cache. Keyed by entity_ptr so values
+        # survive a pause (Draw ptr 0, frame counter stalls, engine
+        # stops deciding). Pruned when the registry no longer holds
+        # the entity. Each value: dict with keys
+        #   "last":   AIDecision (newest pick)
+        #   "history": deque-style list of AIDecision (newest-last,
+        #              capped at AI_HISTORY_DEPTH)
+        #   "last_frame_ctr": int u8 — last polled +0x092 value
+        #   "last_frame_seen_poll": poll# we last saw the counter change
+        self._ai_cache: dict = {}
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -481,7 +494,114 @@ class MemoryReader:
             m = self._parse_monster(slot, ptr, mb)
             if m is not None:
                 out.append(m)
+        # Read the PRX-side AI publish table (one round-trip) and decorate
+        # each monster with its current / cached AI decision. Safe to call
+        # even when the PRX mod isn't loaded — magic check fails silently.
+        ai_table = self._read_ai_publish(c)
+        self._merge_ai_decisions(out, ai_table)
         return out
+
+    def _read_ai_publish(self, c: PPSSPPClient):
+        """Return {entity_ptr: (vt8_input, engine_value, serial)} from the
+        PRX ai_publish table, or {} if not present.
+
+        Tolerant of: PRX not loaded (no magic), partial PRX install
+        (magic but version mismatch), and read errors.
+        """
+        try:
+            buf = c.read_memory(A.AI_PUBLISH_BASE, A.AI_PUBLISH_SPAN)
+        except PPSSPPError:
+            return {}
+        if len(buf) < A.AI_PUBLISH_HEADER_SIZE:
+            return {}
+        magic, version, slot_cnt, stride = struct.unpack_from(
+            "<IIII", buf, 0)
+        if magic != A.AI_PUBLISH_MAGIC:
+            return {}
+        if version != 1 or stride != A.AI_PUBLISH_ENTRY_STRIDE:
+            return {}
+        out = {}
+        slot_cnt = min(slot_cnt, A.AI_PUBLISH_SLOT_COUNT)
+        for i in range(slot_cnt):
+            off = A.AI_PUBLISH_HEADER_SIZE + i * stride
+            if off + stride > len(buf):
+                break
+            ent, packed, engine_value, dec_serial, spawn_serial = \
+                struct.unpack_from("<IIIII", buf, off)
+            if ent == 0:
+                continue
+            mon_type = packed & 0xFF
+            # slot_idx = (packed >> 8) & 0xFF   # reserved for future use
+            vt8_input = (packed >> 16) & 0xFFFF
+            out[ent] = (mon_type, vt8_input, engine_value,
+                        dec_serial, spawn_serial)
+        return out
+
+    def _merge_ai_decisions(self, monsters, table):
+        """For each monster: read its Draw ptr + frame counter (already in
+        the struct slurp), look up the publish-table entry, and update the
+        per-entity cache. The cache survives pause so the HUD can keep
+        showing the last decided action while the game is frozen.
+
+        Pause detection (game-side): Draw ptr == 0 OR frame counter has
+        not advanced since the previous poll for this entity. Either is
+        enough to flag the entity as paused — the HUD then renders the
+        cached decision with a "paused" badge rather than blanking.
+        """
+        live_ptrs = {m.ptr for m in monsters}
+        # Prune cache for despawned entities so it doesn't grow unboundedly
+        # across multiple quest runs that recycle pointers.
+        for stale in [p for p in self._ai_cache if p not in live_ptrs]:
+            self._ai_cache.pop(stale, None)
+        for m in monsters:
+            # Frame counter pause-detection — bypasses Draw ptr quirks.
+            cache = self._ai_cache.setdefault(m.ptr, {
+                "last": None, "history": [],
+                "last_frame_ctr": None, "last_frame_seen_poll": 0,
+            })
+            fc = m.ai.frame_counter if m.ai else 0
+            prev_fc = cache["last_frame_ctr"]
+            if prev_fc is None or fc != prev_fc:
+                cache["last_frame_ctr"] = fc
+                cache["last_frame_seen_poll"] = self._poll_count
+            # Considered paused if frame counter hasn't moved in 2+ polls
+            # (>= ~0.7 s at 3 Hz) OR Draw ptr is 0.
+            stale_polls = self._poll_count - cache["last_frame_seen_poll"]
+            paused = (m.draw_ptr == 0) or (stale_polls >= 2)
+
+            # Pull this entity's publish-table entry (if any) and update
+            # the cache if the serial advanced.
+            entry = table.get(m.ptr)
+            if entry is not None:
+                _mtype, vt8_in, engine_val, dec_serial, _spawn_serial = entry
+                prev = cache["last"]
+                if dec_serial != 0 and (prev is None or
+                                        prev.serial != dec_serial):
+                    dec = AIDecision(
+                        vt8_input=vt8_in, engine_value=engine_val,
+                        serial=dec_serial,
+                        cached_at_poll=self._poll_count, paused=False,
+                    )
+                    cache["last"] = dec
+                    cache["history"].append(dec)
+                    if len(cache["history"]) > AI_HISTORY_DEPTH:
+                        del cache["history"][:-AI_HISTORY_DEPTH]
+
+            # Hand the cached decision back to the monster, flagged with
+            # the current pause state. last is None until at least one
+            # decision has fired since spawn.
+            last = cache["last"]
+            if last is not None:
+                # Build a fresh frozen dataclass with the current paused
+                # flag (AIDecision is frozen by intent — copy on flag flip).
+                m.last_ai = AIDecision(
+                    vt8_input=last.vt8_input,
+                    engine_value=last.engine_value,
+                    serial=last.serial,
+                    cached_at_poll=last.cached_at_poll,
+                    paused=paused,
+                )
+            m.ai_history = list(cache["history"])
 
     def _parse_monster(self, slot, ptr, mb):
         vtable = struct.unpack_from("<I", mb, A.OFF_M_VTABLE)[0]
@@ -490,6 +610,7 @@ class MemoryReader:
         pos = _vec3(mb, A.OFF_M_POSITION)
         if not _finite(pos):
             return None
+        draw_ptr = struct.unpack_from("<I", mb, A.OFF_M_DRAW_PTR)[0]
         hp = struct.unpack_from("<H", mb, A.OFF_M_HP)[0]
         type_byte = mb[A.OFF_M_TYPE]
         entity_id = mb[A.OFF_M_ENTITY_ID]
@@ -521,7 +642,7 @@ class MemoryReader:
             pos=pos, hp=hp, ai_behavior=ai_behav, ai_324=ai_324,
             ai_32c=ai_32c, vtable=vtable, category=category,
             name=name, icon_slug=slug, hp_max=hp, size_scale=size_scale,
-            ai=ai)
+            ai=ai, draw_ptr=draw_ptr)
 
     @staticmethod
     def _parse_monster_ai(mb: bytes) -> MonsterAI:

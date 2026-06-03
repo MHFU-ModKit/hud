@@ -10,7 +10,7 @@ import math
 
 import pygame
 
-from .. import panels, widgets as W
+from .. import ai_decisions, panels, widgets as W
 from ..theme import C, CANVAS_W, CANVAS_H
 from .base import Layout
 
@@ -35,7 +35,7 @@ PLAYER_MARKER_R = 9
 class QuestLayout(Layout):
     name = "quest"
 
-    DETAIL_SUBTABS = ("stats", "ai_diag")
+    DETAIL_SUBTABS = ("stats", "ai_diag", "ai_actions")
 
     def __init__(self, assets, calib, reader=None):
         super().__init__(assets, calib)
@@ -674,26 +674,51 @@ class QuestLayout(Layout):
 
         dist = self._distance(m, snapshot.player)
         size_str = "?" if m.size_scale is None else f"{m.size_scale:.3f}×"
+        # Compact decoded AI line (one row) — replaces the three raw AI
+        # cells (behavior / 0x324 / 0x32C) that previously cluttered this
+        # narrow panel. The raw cells are still on the AI DIAG sub-tab;
+        # the decoded macro is the one the user actually reads at a
+        # glance. Paused entities get a "[P]" prefix.
+        ai_label, ai_color = self._ai_oneline(m, max_chars=22)
         rows = [
             ("Slot", m.slot),
             ("Pointer", f"0x{m.ptr:08X}"),
             ("Type byte", f"0x{m.type_byte:02X}"),
             ("Entity ID", f"0x{m.entity_id:02X}"),
             ("Size scale", size_str),
-            ("AI behavior", m.ai_behavior),
-            ("AI 0x324", m.ai_324),
-            ("AI 0x32C", m.ai_32c),
+            ("AI pick", ai_label),
             ("World X", f"{m.pos.x:.0f}"),
             ("World Y", f"{m.pos.y:.0f}"),
             ("World Z", f"{m.pos.z:.0f}"),
             ("Dist", "—" if dist is None else f"{dist:.0f}"),
         ]
-        W.kv_rows(surface, (x, self._detail_rect.y + 148), rows, size=12, line_h=18,
-                  key_w=92)
-        W.text(surface, "+/- size  ·  PgUp/Dn type  ·  ENTER detail",
+        W.kv_rows(surface, (x, self._detail_rect.y + 148), rows, size=12,
+                  line_h=18, key_w=92)
+        W.text(surface,
+               "+/- size  ·  PgUp/Dn type  ·  ENTER  ·  B bag",
                (self._detail_rect.centerx,
                 self._detail_rect.bottom - 22), size=10, color=C.TEXT_FAINT,
                align="center")
+
+    def _ai_oneline(self, m, max_chars: int = 28):
+        """Decode m.last_ai into a single short label string + colour.
+
+        Returns ("— no pick", PLACEHOLDER) when nothing has fired yet, or
+        a truncated `[P] <macro>` / `<macro>` string otherwise. The DETAIL
+        panel uses max_chars=22 to fit in its narrow column; other places
+        can pass a larger budget.
+        """
+        last = m.last_ai
+        if last is None:
+            return "— no pick", C.PLACEHOLDER
+        d = ai_decisions.decode(m.type_byte, last.vt8_input, last.engine_value)
+        prefix = "[P] " if last.paused else ""
+        s = prefix + d.label
+        if len(s) > max_chars:
+            s = s[:max_chars - 1] + "…"
+        if last.paused:
+            return s, C.WARN
+        return s, (C.TEXT if d.is_known else C.TEXT_DIM)
 
     # --- overlays ----------------------------------------------------------
 
@@ -701,19 +726,41 @@ class QuestLayout(Layout):
         self.dim(surface, pygame.Rect(0, 0, CANVAS_W, CANVAS_H), 170)
         box = pygame.Rect(CANVAS_W // 2 - 280, CANVAS_H // 2 - 200, 560, 400)
         W.panel(surface, box, fill=C.PANEL_HI, border=C.SELECT)
-        # Sub-tab indicator + tabs label. Title font shrunk + hint moved
-        # to the panel footer so they don't collide on narrow names.
-        tab_str = "STATS" if self.detail_subtab == "stats" else "AI DIAG"
+        tab_titles = {
+            "stats":      "STATS",
+            "ai_diag":    "AI DIAG",
+            "ai_actions": "AI ACTIONS",
+        }
+        tab_str = tab_titles.get(self.detail_subtab, self.detail_subtab.upper())
         W.text(surface, f"{m.name}  —  {tab_str}",
                (box.x + 20, box.y + 14), size=18, color=C.SELECT, bold=True)
+        # Render sub-tab chip strip top-right so the user sees the
+        # current page + neighbours at a glance.
+        self._draw_subtab_chips(surface, box)
         W.text(surface, "TAB switch  ·  ENTER/ESC close",
                (box.right - 20, box.bottom - 24), size=11, color=C.TEXT_DIM,
                align="right")
 
         if self.detail_subtab == "stats":
             self._detail_subtab_stats(surface, box, m, player)
-        else:
+        elif self.detail_subtab == "ai_diag":
             self._detail_subtab_ai(surface, box, m)
+        else:
+            self._detail_subtab_actions(surface, box, m)
+
+    def _draw_subtab_chips(self, surface, box):
+        """Small page-indicator chips beneath the title, so the user can
+        see which sub-page is active out of the 3 cycleable ones."""
+        chip_y = box.y + 40
+        chip_x = box.x + 20
+        for tab in self.DETAIL_SUBTABS:
+            label = {"stats": "STATS", "ai_diag": "AI DIAG",
+                     "ai_actions": "AI ACTIONS"}.get(tab, tab)
+            active = (tab == self.detail_subtab)
+            color = C.SELECT if active else C.TEXT_DIM
+            chip = W.text(surface, label, (chip_x, chip_y), size=10,
+                          color=color, bold=active)
+            chip_x = chip.right + 18
 
     def _detail_subtab_stats(self, surface, box, m, player):
         icon = self.assets.monster_icon(m.icon_slug)
@@ -811,10 +858,100 @@ class QuestLayout(Layout):
         if m.type_byte == 0x3A:
             W.text(surface,
                    "type 0x3A  ·  alt dispatcher  ·  +0x640 is runtime-mutable",
-                   (box.x + 20, box.bottom - 60), size=11, color=C.WARN,
+                   (box.x + 20, box.bottom - 44), size=11, color=C.WARN,
                    bold=True)
-        W.text(surface, "read-only here  —  use AI-MOD tab to pin / edit",
-               (box.x + 20, box.bottom - 44), size=11, color=C.TEXT_FAINT)
+        W.text(surface, "TAB → AI ACTIONS for decoded picks",
+               (box.x + 20, box.bottom - 28), size=11, color=C.TEXT_FAINT)
+
+    def _detail_subtab_actions(self, surface, box, m):
+        """Decoded AI-decision sub-page — full box, no overlap with the
+        raw AI_DIAG cells. Renders a big "CURRENT PICK" header with
+        macro name + PAUSED/LIVE badge, plus a scrollable history list
+        below (up to AI_HISTORY_DEPTH entries, newest-first).
+        """
+        from ..reader import AI_HISTORY_DEPTH
+
+        x0 = box.x + 24
+        y0 = box.y + 68          # below the title + chip strip
+        # --- current pick ----------------------------------------------------
+        W.text(surface, "CURRENT PICK", (x0, y0),
+               size=11, color=C.ACCENT, bold=True)
+        last = m.last_ai
+        if last is None:
+            W.text(surface, "— no decision captured yet",
+                   (x0, y0 + 18), size=14, color=C.PLACEHOLDER)
+            W.text(surface,
+                   "Wait for the engine to tick AI — fires on action change.",
+                   (x0, y0 + 40), size=11, color=C.TEXT_FAINT)
+            W.text(surface,
+                   "If this stays empty for >10 s, PRX ai_publish is not loaded "
+                   "or the monster is not yet in a section the engine ticks.",
+                   (x0, y0 + 56), size=10, color=C.TEXT_FAINT)
+            return
+        d = ai_decisions.decode(m.type_byte, last.vt8_input, last.engine_value)
+        badge = "PAUSED" if last.paused else "LIVE"
+        badge_color = C.WARN if last.paused else C.OK
+        W.text(surface, badge, (x0 + 110, y0), size=11,
+               color=badge_color, bold=True)
+        W.text(surface,
+               f"  ·  ai_class={d.ai_class}  ·  serial #{last.serial}  "
+               f"·  monster=0x{m.type_byte:02X} ({d.monster_name})",
+               (x0 + 160, y0), size=11, color=C.TEXT_FAINT)
+        # Decoded macro — big.
+        label_color = C.TEXT if d.is_known else C.TEXT_DIM
+        W.text(surface, d.label, (x0, y0 + 18), size=18,
+               color=label_color, bold=True)
+        # Raw payload row underneath (small)
+        if d.ai_class == "true-big":
+            payload = f"vt8_input = 0x{last.vt8_input:04X}   →   ptr = 0x{last.engine_value:08X}"
+        else:
+            payload = f"engine_id = 0x{last.engine_value:08X}   (low u16 = 0x{last.engine_value & 0xFFFF:04X})"
+        W.text(surface, payload, (x0, y0 + 44), size=11,
+               color=C.TEXT_DIM)
+
+        # --- history ---------------------------------------------------------
+        # The history block gets the rest of the box. Show newest-first,
+        # one row per pick, with serial + macro + raw payload.
+        list_y = y0 + 84
+        list_h = box.bottom - 56 - list_y     # leave footer hint space
+        W.text(surface, f"RECENT PICKS  (newest first, up to {AI_HISTORY_DEPTH})",
+               (x0, list_y - 18), size=10, color=C.ACCENT, bold=True)
+        # Optional pause hint on the right of the section header.
+        if last.paused:
+            W.text(surface,
+                   "engine paused — list frozen at last pick",
+                   (box.right - 24, list_y - 18), size=10,
+                   color=C.WARN, bold=True, align="right")
+        if not m.ai_history:
+            W.text(surface, "no history yet — wait for AI to pick",
+                   (x0, list_y), size=11, color=C.PLACEHOLDER)
+            return
+        rows = list(reversed(m.ai_history))
+        line_h = 18
+        max_rows = max(1, list_h // line_h)
+        rows = rows[:max_rows]
+        ry = list_y
+        for entry in rows:
+            de = ai_decisions.decode(m.type_byte, entry.vt8_input,
+                                     entry.engine_value)
+            # serial col (fixed width 60)
+            W.text(surface, f"#{entry.serial:>4d}", (x0, ry), size=12,
+                   color=C.TEXT_DIM, bold=True)
+            # macro col
+            ecolor = C.TEXT if de.is_known else C.TEXT_DIM
+            macro = de.label
+            if len(macro) > 30:
+                macro = macro[:29] + "…"
+            W.text(surface, macro, (x0 + 64, ry), size=12,
+                   color=ecolor, bold=de.is_known)
+            # payload col (right-aligned within the box)
+            if de.ai_class == "true-big":
+                tail = f"→ 0x{entry.engine_value:08X}"
+            else:
+                tail = f"= 0x{entry.engine_value & 0xFFFF:04X}"
+            W.text(surface, tail, (box.right - 24, ry), size=11,
+                   color=C.TEXT_FAINT, align="right")
+            ry += line_h
 
     def _calib_hint(self, surface):
         box = pygame.Rect(CANVAS_W // 2 - 320, CANVAS_H - 116, 640, 76)
