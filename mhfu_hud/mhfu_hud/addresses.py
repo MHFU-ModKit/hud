@@ -83,6 +83,18 @@ SHARPNESS_TIER_NAMES = (
 VILLAGE_MAP_SECTION = 35
 ENTITY_MAX_SLOTS = 21
 
+# --- AI publish region (PRX ai_publish mod) --------------------------------
+# Fixed scratch region the PRX writes to and the HUD reads.
+# Layout: see framework/prx/mods/ai_publish/mod.cpp.
+# Header (0x18 bytes) + 21 entries of 0x14 bytes each = 0x1B4 bytes.
+AI_PUBLISH_BASE = 0x08AE2000
+AI_PUBLISH_MAGIC = 0x42504941          # 'AIPB' little-endian
+AI_PUBLISH_HEADER_SIZE = 0x18
+AI_PUBLISH_ENTRY_STRIDE = 0x14
+AI_PUBLISH_SLOT_COUNT = 21
+AI_PUBLISH_SPAN = (AI_PUBLISH_HEADER_SIZE
+                   + AI_PUBLISH_SLOT_COUNT * AI_PUBLISH_ENTRY_STRIDE)
+
 # --- Player struct ---------------------------------------------------------
 PLAYER_STRUCT  = 0x090BB4C0
 PLAYER_VTABLE  = 0x089BAB08
@@ -101,6 +113,13 @@ CAM_SPAN   = 0x180              # bytes to slurp from CAM_TARGET
 
 # --- Monster entity (offsets from entity_ptr; small-monster layout) --------
 OFF_M_VTABLE    = 0x000         # u32
+# Draw pointer. Engine binds this only when the player is in the
+# monster's section AND the game is running. Goes 0 on pause, on
+# section unbind, and during the section-1 force-coords bug
+# (see snow-map-section6-and-draw-interp memory). The HUD uses
+# 0 here as a "freeze AI decision display" signal so paused values
+# don't blank out.
+OFF_M_DRAW_PTR  = 0x008         # u32
 OFF_M_ENTITY_ID = 0x1E4         # u8
 OFF_M_TYPE      = 0x1E8         # u8  (unreliable — varies by state)
 OFF_M_POSITION  = 0x200         # vec3 world coords (== camera-target frame)

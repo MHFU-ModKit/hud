@@ -78,6 +78,24 @@ class MonsterAI:
     flee_flag: int = 0                                  # +0x6D8 u8 OUTPUT
 
 
+@dataclass(frozen=True)
+class AIDecision:
+    """One AI pick captured from the PRX ai_publish table.
+
+    `cached_at_poll` tags the poll at which we last saw the publish
+    table's serial change for this entity. When the game is paused
+    (Draw ptr == 0 / frame counter not advancing) the engine stops
+    deciding, so the PRX serial freezes — the HUD keeps showing the
+    last observed value rather than blanking. `paused` records whether
+    the entity is currently considered frozen so the UI can flag it.
+    """
+    vt8_input: int = 0           # u16
+    engine_value: int = 0        # u32 — id (small-shape) OR ptr (true-big)
+    serial: int = 0              # PRX-side global serial at last update
+    cached_at_poll: int = 0      # HUD poll# when we latched this entry
+    paused: bool = False         # True = Draw ptr 0 / frame counter stalled
+
+
 @dataclass
 class MonsterHUD:
     slot: int
@@ -104,6 +122,17 @@ class MonsterHUD:
     # next to HP / name in the monster panels.
     size_scale: Optional[float] = None
     ai: Optional[MonsterAI] = None  # populated when the AI block is parsed
+    # Engine's currently-bound Draw pointer (entity+0x008). 0 means
+    # paused or not-currently-rendered; the AI-decision panel uses this
+    # plus the publish-table serial to decide whether to display the
+    # live read or the last cached pick.
+    draw_ptr: int = 0
+    # Last AI pick published by the PRX ai_publish mod. None when the
+    # PRX hasn't been seen yet (no magic at AI_PUBLISH_BASE) OR when
+    # the entity has not yet had a vt[8] decision since spawn.
+    last_ai: Optional[AIDecision] = None
+    # Short rolling history of decisions for the AI_DIAG panel.
+    ai_history: list = field(default_factory=list)   # newest-last
 
 
 @dataclass(frozen=True)

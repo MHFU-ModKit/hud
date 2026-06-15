@@ -40,7 +40,7 @@ _HELP = [
     ("+ / -", "live edit selected monster size (±0.05)"),
     ("PgUp / PgDn", "live edit selected monster type byte (±1)"),
     ("ENTER", "open / close monster detail page"),
-    ("TAB", "in monster detail: STATS ↔ AI-DIAG sub-pages"),
+    ("TAB", "in monster detail: cycle STATS → AI-DIAG → AI-ACTIONS"),
     ("M", "cycle map image (quest)"),
     ("", ""),
     ("↑ ↓ ← →", "navigate quest-prep panels + rows"),
