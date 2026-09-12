@@ -1,0 +1,11 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# HUD artwork — Capcom-owned art from the Monster Hunter Fandom wiki, fetched locally:
+#     python mhfu_hud/tools/fetch_assets.py
+mhfu_hud/assets/
+mhfu_hud/config/calibration.local.json
+
+.DS_Store
