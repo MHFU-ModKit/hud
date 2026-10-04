@@ -4,6 +4,8 @@
 
 # MHFU ModKit — live HUD
 
+> **Archived.** This code now lives in [MHFU-ModKit/modkit](https://github.com/MHFU-ModKit/modkit), at [`apps/hud`](https://github.com/MHFU-ModKit/modkit/tree/main/apps/hud). Open issues and pull requests there.
+
 A standalone, real-time game-state monitor for **Monster Hunter Freedom Unite** running under
 **PPSSPP**. Start it next to the emulator; it attaches over PPSSPP's debugger WebSocket, polls
 memory, parses the live game state, and renders it in a HUD-style window — hunter, monsters,
